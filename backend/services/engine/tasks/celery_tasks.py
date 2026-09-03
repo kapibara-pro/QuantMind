@@ -814,6 +814,138 @@ def daily_data_sync_task(
             pass
 
 
+@celery_app.task(
+    name="engine.tasks.run_quantdb_console_sync",
+    bind=True,
+    max_retries=0,
+    # 手动全量同步可能远超过通用任务的 1 小时上限；单独放宽到 6 小时。
+    time_limit=int(os.getenv("QUANTDB_CONSOLE_SYNC_TIME_LIMIT", "21600")),
+    soft_time_limit=int(os.getenv("QUANTDB_CONSOLE_SYNC_SOFT_TIME_LIMIT", "19800")),
+)
+def run_quantdb_console_sync_task(
+    self,
+    job_id: str,
+    datasets: list[str],
+    with_pg: bool = False,
+    with_qlib: bool = False,
+    pg_full: bool = False,
+) -> dict[str, Any]:
+    """管理台 QuantDB 控制台触发的后台同步（在 Celery worker 中执行，不占 API 进程内存）。
+
+    与 daily_data_sync_task 的差异：按控制台勾选的数据集执行，
+    parquet / PG / Qlib 三个阶段全部通过 Redis job 记录进度，支持控制台取消。
+    """
+    from backend.scripts.quantdb_daily_sync import run_daily_sync
+    from backend.shared.quantdb_sync_jobs import (
+        _now_iso,
+        cancel_requested,
+        celery_progress_cb,
+        upsert_job,
+    )
+
+    logger.info("[QuantDBConsoleSync] 开始: job=%s datasets=%s pg=%s qlib=%s",
+                job_id, datasets, with_pg, with_qlib)
+
+    def _set(**fields: Any) -> None:
+        upsert_job(job_id, **fields)
+
+    def _cancelled() -> bool:
+        return cancel_requested(job_id)
+
+    try:
+        _set(status="running", stage="sync_parquet")
+        sync_result = run_daily_sync(
+            datasets=datasets,
+            skip_pg=True,        # PG 单独处理
+            skip_qlib=True,      # Qlib 单独处理
+            skip_snapshot=True,  # snapshot 不在此任务处理
+            progress_cb=celery_progress_cb(job_id),
+            should_cancel=_cancelled,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[QuantDBConsoleSync] %s parquet 同步失败: %s", job_id, exc, exc_info=True)
+        _set(status="failed", stage="sync_parquet", error=str(exc), finished_at=_now_iso())
+        return {"status": "failed", "error": str(exc)}
+
+    # parquet 阶段结果 -> job results（与旧 API 内存任务保持同样展示格式）
+    parquet_info = sync_result.get("parquet") or {}
+    synced_count = parquet_info.get("synced", 0)
+    errors = parquet_info.get("errors", [])
+    sources_info = sync_result.get("sources") or {}
+
+    results: list[dict[str, Any]] = []
+    cancelled = _cancelled()
+    for name in datasets:
+        src = sources_info.get(name)
+        if src is not None:
+            if src.get("status") == "error":
+                results.append({
+                    "dataset": name, "status": "failed", "downloaded": 0,
+                    "error": str(src.get("error", "unknown")),
+                })
+            elif src.get("synced", 0) > 0 or src.get("status") in ("ok", "completed"):
+                results.append({
+                    "dataset": name, "status": "synced",
+                    "downloaded": src.get("synced", 1),
+                })
+            else:
+                results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+        elif cancelled:
+            results.append({
+                "dataset": name, "status": "skipped", "downloaded": 0,
+                "reason": "用户取消",
+            })
+        elif any(name in str(e) for e in errors):
+            results.append({
+                "dataset": name, "status": "failed", "downloaded": 0,
+                "error": next((e for e in errors if name in str(e)), "unknown"),
+            })
+        elif synced_count > 0:
+            results.append({"dataset": name, "status": "synced", "downloaded": 1})
+        else:
+            results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+
+    _set(
+        results=results,
+        done=sum(1 for r in results if r.get("status") in ("synced", "up_to_date")),
+    )
+
+    if cancelled:
+        _set(status="cancelled", stage="done", current=None, finished_at=_now_iso())
+        return {"status": "cancelled"}
+
+    # Phase 2: PG 填充
+    if with_pg:
+        _set(stage="pg_fill")
+        try:
+            from backend.scripts.quantdb_daily_sync import QUANTDB_EPOCH, fill_pg_from_parquet
+
+            start = QUANTDB_EPOCH if pg_full else None
+            _set(pg_fill=fill_pg_from_parquet(start_date=start))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[QuantDBConsoleSync] %s PG 填充失败: %s", job_id, exc, exc_info=True)
+            _set(pg_fill={"status": "error", "reason": str(exc)})
+
+    if _cancelled():
+        _set(status="cancelled", stage="done", finished_at=_now_iso())
+        return {"status": "cancelled"}
+
+    # Phase 3: Qlib 缓存
+    if with_qlib:
+        _set(stage="qlib_cache")
+        try:
+            from backend.scripts.quantdb_daily_sync import update_qlib_cache
+
+            _set(qlib_cache=update_qlib_cache())
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[QuantDBConsoleSync] %s Qlib 缓存失败: %s", job_id, exc, exc_info=True)
+            _set(qlib_cache={"status": "error", "reason": str(exc)})
+
+    _set(status="completed", stage="done", finished_at=_now_iso())
+    logger.info("[QuantDBConsoleSync] %s 完成", job_id)
+    return {"status": "completed"}
+
+
 @celery_app.task(name="engine.tasks.update_qlib_cache", max_retries=0, bind=True)
 def update_qlib_cache_task(self) -> dict[str, Any]:
     """独立增量更新 Qlib 缓存（不依赖完整每日同步）。

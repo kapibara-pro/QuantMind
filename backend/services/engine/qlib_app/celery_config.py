@@ -10,6 +10,7 @@ from pathlib import Path
 
 from celery import Celery
 from celery.schedules import crontab
+from kombu import Exchange, Queue
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -91,10 +92,21 @@ CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "86400"))
 CELERY_QUEUE = os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv").strip() or "qlib_backtest_srv"
 CELERY_EXCHANGE = os.getenv("QLIB_CELERY_EXCHANGE", "qlib")
 CELERY_ROUTING_KEY = os.getenv("QLIB_CELERY_ROUTING_KEY", "qlib.backtest")
+QUANTDB_SYNC_QUEUE = os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync").strip() or "quantdb_sync"
+QUANTDB_SYNC_EXCHANGE = os.getenv("QUANTDB_SYNC_EXCHANGE", CELERY_EXCHANGE).strip() or CELERY_EXCHANGE
 AUTO_INFERENCE_ENABLED = os.getenv("AUTO_INFERENCE_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_ENABLED = os.getenv("NEWS_ENRICH_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_INTERVAL_SEC = int(os.getenv("NEWS_ENRICH_INTERVAL_SEC", "60"))
 NEWS_MATCHER_RELOAD_SEC = int(os.getenv("NEWS_MATCHER_RELOAD_SEC", "600"))
+
+# 显式声明队列：管理台 QuantDB 同步与 qlib/回测共用 qlib direct exchange，
+# 但使用独立 routing_key，从而可以由独立 worker 消费，互不抢占进程。
+_default_exchange = Exchange(CELERY_EXCHANGE, type="direct")
+_quantdb_sync_exchange = Exchange(QUANTDB_SYNC_EXCHANGE, type="direct")
+task_queues = (
+    Queue(CELERY_QUEUE, exchange=_default_exchange, routing_key=CELERY_ROUTING_KEY),
+    Queue(QUANTDB_SYNC_QUEUE, exchange=_quantdb_sync_exchange, routing_key=QUANTDB_SYNC_QUEUE),
+)
 
 # Celery配置
 beat_schedule = {}
@@ -187,6 +199,7 @@ celery_app.conf.update(
     task_acks_late=CELERY_TASK_ACKS_LATE,  # 任务完成后才ack
     task_reject_on_worker_lost=CELERY_TASK_REJECT_ON_WORKER_LOST,
     # 队列配置
+    task_queues=task_queues,
     task_default_queue=CELERY_QUEUE,
     task_default_exchange=CELERY_EXCHANGE,
     task_default_routing_key=CELERY_ROUTING_KEY,
@@ -194,6 +207,8 @@ celery_app.conf.update(
     task_routes={
         "backend.services.engine.qlib_app.tasks.*": {"queue": CELERY_QUEUE},
         "qlib_app.tasks.*": {"queue": CELERY_QUEUE},
+        # 管理台手动 QuantDB 同步走独立队列，避免与回测/期货等重任务抢 Celery 进程
+        "engine.tasks.run_quantdb_console_sync": {"queue": QUANTDB_SYNC_QUEUE},
     },
     imports=(
         "backend.services.engine.qlib_app.tasks",
