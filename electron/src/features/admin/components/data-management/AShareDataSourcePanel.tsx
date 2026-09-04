@@ -69,6 +69,7 @@ const SOURCE_FALLBACKS: DataSyncSource[] = [
 export const AShareDataSourcePanel: React.FC = () => {
     const [sources, setSources] = useState<DataSyncSource[]>(SOURCE_FALLBACKS);
     const [sourceId, setSourceId] = useState<'quantdb' | 'easy_tdx'>('quantdb');
+    const [sourceEnabled, setSourceEnabled] = useState<Record<string, boolean>>({});
     const [datasets, setDatasets] = useState<DataSourceDataset[]>([]);
     const [selectedDatasets, setSelectedDatasets] = useState<string[]>([]);
     const [days, setDays] = useState(5);
@@ -83,18 +84,6 @@ export const AShareDataSourcePanel: React.FC = () => {
         channels: Record<'standard' | 'mac', EasyTdxServer[]>;
     } | null>(null);
     const [testingServers, setTestingServers] = useState(false);
-
-    const loadSources = useCallback(async () => {
-        try {
-            const response = await dataPlatformService.listSources();
-            const selectable = (response.sync_sources || []).filter(
-                (item) => item.markets.includes('A') && item.sync_supported,
-            );
-            if (selectable.length) setSources(selectable);
-        } catch (error) {
-            console.error('[AShareDataSourcePanel] load sources failed', error);
-        }
-    }, []);
 
     const loadDatasets = useCallback(async (nextSource: 'quantdb' | 'easy_tdx') => {
         const response = await dataPlatformService.getSourceDatasets(nextSource);
@@ -115,9 +104,41 @@ export const AShareDataSourcePanel: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        loadSources();
-        loadDatasets('quantdb').catch(() => undefined);
-    }, [loadDatasets, loadSources]);
+        let cancelled = false;
+
+        const initialize = async () => {
+            const [sourceResponse, configResponse] = await Promise.all([
+                dataPlatformService.listSources().catch(() => null),
+                dataPlatformService.getMarketDataSources('quantdb').catch(() => null),
+            ]);
+            if (cancelled) return;
+
+            const selectable = (sourceResponse?.sync_sources || []).filter(
+                (item) => item.markets.includes('A') && item.sync_supported,
+            );
+            if (selectable.length) setSources(selectable);
+
+            const configured = configResponse?.sources || [];
+            setSourceEnabled(Object.fromEntries(
+                configured.map((item) => [item.source, item.enabled]),
+            ));
+            const quantdbEnabled = configured.find((item) => item.source === 'quantdb')?.enabled ?? true;
+            const easyTdxAvailable = selectable.some(
+                (item) => item.source_id === 'easy_tdx' && item.registered,
+            );
+            const nextSource: 'quantdb' | 'easy_tdx' =
+                !quantdbEnabled && easyTdxAvailable ? 'easy_tdx' : 'quantdb';
+            setSourceId(nextSource);
+            try {
+                await loadDatasets(nextSource);
+            } catch (error) {
+                console.error('[AShareDataSourcePanel] load initial datasets failed', error);
+            }
+        };
+
+        initialize();
+        return () => { cancelled = true; };
+    }, [loadDatasets]);
 
     useEffect(() => {
         if (sourceId === 'easy_tdx') loadServers();
@@ -161,6 +182,10 @@ export const AShareDataSourcePanel: React.FC = () => {
     };
 
     const checkUpdates = async () => {
+        if (sourceId === 'quantdb' && sourceEnabled.quantdb === false) {
+            message.warning('QuantDB 数据源未启用，请选择 easy_tdx 或先启用 QuantDB');
+            return;
+        }
         setChecking(true);
         try {
             const response = await dataPlatformService.checkSourceUpdates(
@@ -177,6 +202,10 @@ export const AShareDataSourcePanel: React.FC = () => {
     };
 
     const startSync = async () => {
+        if (sourceId === 'quantdb' && sourceEnabled.quantdb === false) {
+            message.warning('QuantDB 数据源未启用，请选择 easy_tdx 或先启用 QuantDB');
+            return;
+        }
         if (!selectedDatasets.length) {
             message.warning('请至少选择一个数据集');
             return;
@@ -301,7 +330,8 @@ export const AShareDataSourcePanel: React.FC = () => {
                         options={sources.map((item) => ({
                             label: item.label,
                             value: item.source_id,
-                            disabled: item.source_id === 'easy_tdx' && !item.registered,
+                            disabled: (item.source_id === 'easy_tdx' && !item.registered)
+                                || (item.source_id === 'quantdb' && sourceEnabled.quantdb === false),
                         }))}
                     />
                     <Tag color={sourceId === 'easy_tdx' ? 'orange' : 'blue'}>

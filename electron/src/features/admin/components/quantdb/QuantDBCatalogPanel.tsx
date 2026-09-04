@@ -44,12 +44,14 @@ const DIFF_STATUS_TAG: Record<string, { color: string; label: string }> = {
 
 interface QuantDBCatalogPanelProps {
     connected: boolean;
+    /** 数据源配置中的 QuantDB 开关；关闭时仅允许浏览本地目录。 */
+    enabled: boolean;
     onPreview: (dataset: QuantDBDataset) => void;
     /** 外部（如预览抽屉）同步完成后递增，触发目录统计刷新 */
     refreshSignal?: number;
 }
 
-export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }: QuantDBCatalogPanelProps) {
+export function QuantDBCatalogPanel({ connected, enabled, onPreview, refreshSignal = 0 }: QuantDBCatalogPanelProps) {
     const [groups, setGroups] = useState<QuantDBGroup[]>([]);
     const [datasets, setDatasets] = useState<QuantDBDataset[]>([]);
     const [dataDir, setDataDir] = useState('');
@@ -63,6 +65,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
     // Diff state
     const [diff, setDiff] = useState<QuantDBDiffResult | null>(null);
     const [diffLoading, setDiffLoading] = useState(false);
+    const remoteEnabled = connected && enabled;
 
     const loadCatalog = useCallback(async () => {
         setLoading(true);
@@ -107,6 +110,13 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
         }
     }, [refreshSignal, loadCatalog]);
 
+    useEffect(() => {
+        if (!remoteEnabled) {
+            setDiff(null);
+            setDiffLoading(false);
+        }
+    }, [remoteEnabled]);
+
     // 任务运行期间轮询进度；完成/取消时刷新目录统计
     useEffect(() => {
         if (activeJob?.status !== 'running' && activeJob?.status !== 'cancelling') return;
@@ -132,6 +142,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
     }, [activeJob?.status, loadLatestJob, loadCatalog]);
 
     const handleCheckUpdates = useCallback(async () => {
+        if (!remoteEnabled) return;
         setDiffLoading(true);
         try {
             const result = await dataPlatformService.checkQuantDBDiff();
@@ -141,11 +152,11 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
         } finally {
             setDiffLoading(false);
         }
-    }, []);
+    }, [remoteEnabled]);
 
     const handleSyncFromDiff = useCallback(async (datasets: string[]) => {
         setSelected(datasets);
-        if (datasets.length === 0) return;
+        if (!remoteEnabled || datasets.length === 0) return;
         setSubmitting(true);
         try {
             const resp = await dataPlatformService.syncQuantDBDatasets({
@@ -158,7 +169,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
         } finally {
             setSubmitting(false);
         }
-    }, []);
+    }, [remoteEnabled]);
 
     const handleCancelSync = useCallback(async () => {
         if (!activeJob || activeJob.status !== 'running') return;
@@ -200,6 +211,10 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
     };
 
     const triggerSync = async () => {
+        if (!remoteEnabled) {
+            message.warning('QuantDB 数据源未启用或 SDK 未连接');
+            return;
+        }
         if (selected.length === 0) {
             message.warning('请先勾选要同步的数据集');
             return;
@@ -334,6 +349,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
                     loading={diffLoading}
                     onCheckUpdates={handleCheckUpdates}
                     onSyncSelected={handleSyncFromDiff}
+                    remoteEnabled={remoteEnabled}
                 />
             </div>
 
@@ -394,7 +410,7 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
                             icon={<CloudSyncOutlined />}
                             onClick={triggerSync}
                             loading={submitting}
-                            disabled={!connected || selected.length === 0 || isJobRunning}
+                            disabled={!remoteEnabled || selected.length === 0 || isJobRunning}
                             className="flex-1"
                         >
                             {isJobRunning
@@ -412,11 +428,13 @@ export function QuantDBCatalogPanel({ connected, onPreview, refreshSignal = 0 }:
                             </Button>
                         )}
                     </Space>
-                    {!connected && (
+                    {!remoteEnabled && (
                         <Alert
                             type="warning"
                             showIcon
-                            message="SDK 未连接，请先在上方配置有效的 API Key"
+                            message={enabled
+                                ? 'SDK 未连接，请先在上方配置有效的 API Key'
+                                : 'QuantDB 数据源未启用；当前仅展示本地离线目录'}
                         />
                     )}
                 </Space>
