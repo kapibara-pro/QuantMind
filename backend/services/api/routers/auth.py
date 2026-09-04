@@ -50,6 +50,11 @@ async def register(user_data: UserRegister, auth_service: AuthService = Depends(
     """
     用户注册
     """
+    if not settings.enable_public_registration:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="暂未开放用户注册，请联系管理员创建账号",
+        )
     try:
         return await auth_service.register(user_data)
     except ValueError as e:

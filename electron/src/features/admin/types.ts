@@ -3,10 +3,25 @@ import { ApiResponse } from '../auth/types/auth.types';
 export interface AdminUser {
     user_id: string;
     username: string;
-    email: string;
+    email: string | null;
     is_active: boolean;
     is_admin: boolean;
     created_at: string;
+}
+
+export interface AdminUserCreateRequest {
+    username: string;
+    email: string;
+    password: string;
+    is_active: boolean;
+    is_admin: boolean;
+}
+
+export interface AdminUserUpdateRequest {
+    username: string;
+    email: string;
+    is_active: boolean;
+    is_admin: boolean;
 }
 
 export interface AIModel {

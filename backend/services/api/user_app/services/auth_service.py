@@ -451,6 +451,10 @@ class AuthService:
         """对外暴露的密码哈希（兼容测试/调用）"""
         return self._hash_password(password)
 
+    def validate_password(self, password: str) -> None:
+        """对外暴露统一的密码复杂度校验。"""
+        self._validate_password(password)
+
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """对外暴露的密码校验（兼容测试/调用）"""
         return self._verify_password(plain_password, hashed_password)
@@ -556,16 +560,10 @@ class AuthService:
                 )
                 user = result.scalar_one_or_none()
 
-                logger.error(f"DEBUG credentials: {credentials}")
                 if not user:
-                    logger.error("DEBUG user not found")
                     raise ValueError("用户名或密码错误")
 
-                logger.error(
-                    f"DEBUG user found: {user.username}, active={user.is_active}, locked={user.is_locked}"
-                )
                 if not self._verify_password(credentials.password, user.password_hash):
-                    logger.error("DEBUG password verify failed")
                     raise ValueError("用户名或密码错误")
 
                 if not user.is_active:
@@ -726,9 +724,15 @@ class AuthService:
             rbac_service = RBACService(session)
             roles = await rbac_service.get_user_roles(user.user_id)
             role_codes = [role.code for role in roles]
+            is_admin = bool(user.is_admin) or "admin" in role_codes
 
             new_access_token, new_jti = self._create_access_token(
-                user.user_id, tenant_id, user.username, user.email, role_codes
+                user.user_id,
+                tenant_id,
+                user.username,
+                user.email,
+                role_codes,
+                is_admin,
             )
             new_refresh_token = self._create_refresh_token(user.user_id, tenant_id)
 

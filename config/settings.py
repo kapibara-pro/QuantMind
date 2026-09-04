@@ -154,6 +154,9 @@ class Settings(BaseSettings):
     environment: str = os.getenv("APP_ENV", "production")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     edition: str = os.getenv("APP_EDITION", "oss").lower()
+    enable_public_registration: bool = (
+        os.getenv("ENABLE_PUBLIC_REGISTRATION", "false").lower() == "true"
+    )
 
     @property
     def capabilities(self) -> dict:

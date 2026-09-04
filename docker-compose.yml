@@ -83,6 +83,7 @@ services:
       # 应用配置
       - APP_EDITION=oss
       - APP_ENV=production
+      - ENABLE_PUBLIC_REGISTRATION=${ENABLE_PUBLIC_REGISTRATION:-false}
       - SERVICE_MODE=all
       - TZ=Asia/Shanghai
       - PYTHONPATH=/app
