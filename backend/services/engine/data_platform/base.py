@@ -56,6 +56,24 @@ class OfflineDataSourceAdapter(ABC):
     name: str = ""
     markets: list[str] = []
     fields: set[str] = set()
+    category: str = "market_data"
+    transport: str = "unknown"
+    delivery_modes: set[str] = {"batch"}
+    configurable: bool = False
+    managed_service: bool = False
+
+    def describe(self) -> dict[str, Any]:
+        """返回供管理端展示和任务路由使用的数据源能力元数据。"""
+        return {
+            "source_id": self.name,
+            "category": self.category,
+            "transport": self.transport,
+            "delivery_modes": sorted(self.delivery_modes),
+            "capabilities": sorted(self.fields),
+            "markets": list(self.markets),
+            "configurable": self.configurable,
+            "managed_service": self.managed_service,
+        }
 
     # ---- 必选 ----
     @abstractmethod

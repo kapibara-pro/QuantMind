@@ -115,3 +115,54 @@ def test_normalize_of_missing_config_for_unknown_market_uses_global_defaults():
 
     # Act / Assert：未知 market 传入时仅应用全局默认，不抛错
     assert _normalize(None, "XX") == dict(DEFAULT_SCHEDULE)
+
+
+def test_ashare_schedule_persists_easy_tdx_source(stub_redis):
+    saved = save_schedule(
+        "A",
+        {
+            "enabled": True,
+            "source_id": "easy_tdx",
+            "publish_mode": "shadow",
+            "datasets": ["daily_unadjusted", "daily_forward"],
+        },
+    )
+
+    assert saved["source_id"] == "easy_tdx"
+    assert get_schedule("A")["datasets"] == [
+        "daily_unadjusted",
+        "daily_forward",
+    ]
+
+
+def test_run_ashare_easy_tdx_schedule_uses_shadow_sync(monkeypatch):
+    from backend.services.engine.data_platform import easy_tdx_sync
+    from backend.services.engine.tasks.market_sync_scheduler import run_market_sync
+
+    calls = []
+
+    def _fake_sync(**kwargs):
+        calls.append(kwargs)
+        return {"source_id": "easy_tdx", "rows": 10}
+
+    monkeypatch.setattr(easy_tdx_sync, "sync", _fake_sync)
+
+    result = run_market_sync(
+        "A",
+        {
+            "source_id": "easy_tdx",
+            "publish_mode": "shadow",
+            "days": 3,
+            "datasets": ["daily_unadjusted"],
+            "with_qlib": False,
+        },
+    )
+
+    assert result["source_id"] == "easy_tdx"
+    assert calls == [
+        {
+            "datasets": ["daily_unadjusted"],
+            "days": 3,
+            "publish_mode": "shadow",
+        }
+    ]

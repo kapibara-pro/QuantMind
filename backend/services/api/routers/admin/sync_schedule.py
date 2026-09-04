@@ -26,6 +26,8 @@ class SyncScheduleRequest(BaseModel):
     time: str = Field("03:00", description="每天触发时间 HH:MM（Asia/Shanghai，建议凌晨执行如 03:00）")
     days: int = Field(5, ge=1, le=365, description="同步最近 N 个交易日（BC 为自然日）")
     datasets: list[str] = Field(default_factory=list, description="要同步的数据集；空=按默认全量")
+    source_id: str = Field("quantdb", description="数据源标识；A 股可选 quantdb/easy_tdx")
+    publish_mode: str = Field("shadow", description="落盘发布模式；easy_tdx 当前仅支持 shadow")
     with_qlib: bool = Field(False, description="同步后重建 Qlib 缓存")
 
     @field_validator("time")
@@ -38,6 +40,22 @@ class SyncScheduleRequest(BaseModel):
         except ValueError:
             raise ValueError("time 必须是 HH:MM 格式（如 22:30）")
         return v.strip()
+
+    @field_validator("source_id")
+    @classmethod
+    def _validate_source_id(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"quantdb", "easy_tdx"}:
+            raise ValueError("source_id 必须是 quantdb 或 easy_tdx")
+        return value
+
+    @field_validator("publish_mode")
+    @classmethod
+    def _validate_publish_mode(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"shadow", "official"}:
+            raise ValueError("publish_mode 必须是 shadow 或 official")
+        return value
 
 
 def _scheduler():
@@ -85,6 +103,21 @@ async def save_market_schedule(
     market = market.upper()
     if market not in MARKETS:
         raise HTTPException(status_code=404, detail=f"未知市场: {market}")
+    if market != "A" and payload.source_id != "quantdb":
+        raise HTTPException(status_code=400, detail="easy_tdx 仅支持 A 股市场")
+    if payload.source_id == "easy_tdx" and payload.publish_mode != "shadow":
+        raise HTTPException(status_code=400, detail="easy_tdx 第一版仅支持影子落盘")
+    if payload.source_id == "easy_tdx" and payload.with_qlib:
+        raise HTTPException(status_code=400, detail="easy_tdx 尚不能直接重建 Qlib")
+    if payload.source_id == "easy_tdx" and payload.datasets:
+        from backend.services.engine.data_platform.easy_tdx_sync import DATASETS
+
+        unknown = [name for name in payload.datasets if name not in DATASETS]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"easy_tdx 不支持数据集: {unknown[0]}",
+            )
     saved = save_schedule(
         market,
         {
@@ -92,6 +125,8 @@ async def save_market_schedule(
             "time": payload.time,
             "days": payload.days,
             "datasets": payload.datasets,
+            "source_id": payload.source_id,
+            "publish_mode": payload.publish_mode,
             "with_qlib": payload.with_qlib,
         },
     )

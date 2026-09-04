@@ -246,6 +246,12 @@ services:
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       # QuantDB 本地数据中枢（A 股优先数据源）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
+      - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
+      - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
+      - EASY_TDX_PORT=${EASY_TDX_PORT:-7709}
+      - EASY_TDX_TIMEOUT=${EASY_TDX_TIMEOUT:-10}
       # 管理台手动 QuantDB 同步队列（与回测/定时同步队列隔离）
       - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
       # QuantDB 下载并发（单数据集内文件级并发）
@@ -430,6 +436,12 @@ services:
       # QuantDB SDK（数据同步 + 特征快照生成）
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
+      - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
+      - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
+      - EASY_TDX_PORT=${EASY_TDX_PORT:-7709}
+      - EASY_TDX_TIMEOUT=${EASY_TDX_TIMEOUT:-10}
       # QuantDB 同步状态库（避免容器内空库导致全量重下）
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
       # 管理台手动 QuantDB 同步队列（与回测/定时同步队列隔离）
@@ -545,6 +557,12 @@ services:
       # QuantDB SDK（数据同步 + 特征快照生成）
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
+      - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
+      - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
+      - EASY_TDX_PORT=${EASY_TDX_PORT:-7709}
+      - EASY_TDX_TIMEOUT=${EASY_TDX_TIMEOUT:-10}
       # QuantDB 同步状态库（避免容器内空库导致全量重下）
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
       # 管理台手动 QuantDB 同步队列
@@ -618,6 +636,12 @@ services:
       # QuantDB SDK（数据同步调度需要）
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
+      - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
+      - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
+      - EASY_TDX_PORT=${EASY_TDX_PORT:-7709}
+      - EASY_TDX_TIMEOUT=${EASY_TDX_TIMEOUT:-10}
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
 
       # 数据同步定时任务

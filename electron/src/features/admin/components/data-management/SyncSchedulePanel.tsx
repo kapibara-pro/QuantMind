@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, Checkbox, InputNumber, message, Space, Switch, TimePicker } from 'antd';
+import { Alert, Button, InputNumber, message, Select, Space, Switch, Tag, TimePicker } from 'antd';
 import dayjs, { Dayjs } from 'dayjs';
 import { ClockCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { adminService } from '../../services/adminService';
+import { dataPlatformService } from '../../services/dataPlatformService';
 
 export interface MarketSyncSchedule {
     market: string;
@@ -11,6 +12,8 @@ export interface MarketSyncSchedule {
     time: string;
     days: number;
     datasets: string[];
+    source_id: 'quantdb' | 'easy_tdx';
+    publish_mode: 'shadow' | 'official';
 }
 
 interface SyncSchedulePanelProps {
@@ -34,6 +37,8 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
     const [time, setTime] = useState<Dayjs>(dayjs('00:30', 'HH:mm'));
     const [days, setDays] = useState(defaultDays);
     const [datasets, setDatasets] = useState<string[]>([]);
+    const [sourceId, setSourceId] = useState<'quantdb' | 'easy_tdx'>('quantdb');
+    const [datasetOptions, setDatasetOptions] = useState<Array<{ label: string; value: string }>>([]);
 
     useEffect(() => {
         loadSchedule();
@@ -49,13 +54,52 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 setEnabled(!!s.enabled);
                 setTime(dayjs(s.time, 'HH:mm').isValid() ? dayjs(s.time, 'HH:mm') : dayjs('00:30', 'HH:mm'));
                 setDays(s.days ?? defaultDays);
-                setDatasets(s.datasets?.length ? s.datasets : [...selectedDatasets]);
+                const nextSource = s.source_id === 'easy_tdx' ? 'easy_tdx' : 'quantdb';
+                setSourceId(nextSource);
+                await loadSourceDatasets(nextSource, s.datasets);
             }
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : '未知错误';
             message.error(`加载定时配置失败: ${msg}`);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const loadSourceDatasets = async (
+        source: 'quantdb' | 'easy_tdx',
+        savedDatasets?: string[],
+    ) => {
+        if (market !== 'A') {
+            setDatasets(savedDatasets?.length ? savedDatasets : [...selectedDatasets]);
+            return;
+        }
+        try {
+            const response = await dataPlatformService.getSourceDatasets(source);
+            const options = response.datasets.map((item) => ({
+                label: item.label || item.dataset,
+                value: item.dataset,
+            }));
+            setDatasetOptions(options);
+            setDatasets(
+                savedDatasets?.length
+                    ? savedDatasets
+                    : response.datasets.filter((item) => item.default).map((item) => item.dataset),
+            );
+        } catch (error) {
+            setDatasetOptions([]);
+            setDatasets(savedDatasets?.length ? savedDatasets : [...selectedDatasets]);
+            throw error;
+        }
+    };
+
+    const handleSourceChange = async (value: 'quantdb' | 'easy_tdx') => {
+        setSourceId(value);
+        try {
+            await loadSourceDatasets(value);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : '未知错误';
+            message.error(`加载数据集失败: ${msg}`);
         }
     };
 
@@ -67,6 +111,8 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 time: time.format('HH:mm'),
                 days,
                 datasets,
+                source_id: sourceId,
+                publish_mode: sourceId === 'easy_tdx' ? 'shadow' : 'official',
             });
             message.success('定时同步配置已保存');
         } catch (err: unknown) {
@@ -108,6 +154,22 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
             </div>
             {enabled && (
                 <>
+                    {market === 'A' && (
+                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                            <span className="text-xs text-gray-600">数据中枢</span>
+                            <Select
+                                size="small"
+                                value={sourceId}
+                                onChange={handleSourceChange}
+                                style={{ width: 210 }}
+                                options={[
+                                    { label: 'QuantDB', value: 'quantdb' },
+                                    { label: 'easy_tdx 通达信行情', value: 'easy_tdx' },
+                                ]}
+                            />
+                            {sourceId === 'easy_tdx' && <Tag color="orange">影子落盘</Tag>}
+                        </div>
+                    )}
                     <div className="flex flex-wrap items-center gap-2">
                         <Space size="small">
                             <span className="text-xs text-gray-600">每天</span>
@@ -138,13 +200,27 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                             ? `定时同步数据集: ${datasets.join(', ')}（来自当前勾选）`
                             : '未指定数据集时按各市场默认全量同步'}
                     </div>
+                    {market === 'A' && datasetOptions.length > 0 && (
+                        <Select
+                            mode="multiple"
+                            size="small"
+                            className="w-full mt-2"
+                            value={datasets}
+                            onChange={setDatasets}
+                            options={datasetOptions}
+                            placeholder="选择定时同步的数据集"
+                            maxTagCount="responsive"
+                        />
+                    )}
                     <Alert
                         className="mt-2"
                         type="info"
                         showIcon
                         message={
                             <span className="text-xs">
-                                按需错峰触发，避免集中请求；同步在后台执行（Celery），到点自动触发，时区 Asia/Shanghai。
+                                {sourceId === 'easy_tdx'
+                                    ? 'easy_tdx 仅写入独立影子目录，不会覆盖 QuantDB 或直接更新训练因子。'
+                                    : '同步在后台执行（Celery），到点自动触发，时区 Asia/Shanghai。'}
                             </span>
                         }
                     />

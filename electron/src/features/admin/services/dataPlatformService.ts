@@ -38,6 +38,63 @@ export interface SourceSummary {
         error_rate_1h?: number;
         avg_latency_ms?: number;
     };
+    metadata?: DataSyncSource;
+}
+
+export interface DataSyncSource {
+    source_id: string;
+    label: string;
+    adapter_name: string;
+    category: string;
+    transport: string;
+    markets: string[];
+    delivery_modes: string[];
+    capabilities: string[];
+    datasets: string[];
+    configurable: boolean;
+    managed_service: boolean;
+    sync_supported: boolean;
+    registered: boolean;
+    notes: string;
+}
+
+export interface DataSourceDataset {
+    dataset: string;
+    label: string;
+    default?: boolean;
+    synced?: boolean;
+    end_date?: string | null;
+    partitions?: number;
+}
+
+export interface DataSourceSyncJob {
+    job_id: string;
+    source_id: string;
+    market: string;
+    status: 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+    stage: string;
+    datasets: string[];
+    days: number;
+    publish_mode: 'shadow' | 'official';
+    done: number;
+    total?: number | null;
+    current?: string | null;
+    result?: Record<string, any> | null;
+    error?: string | null;
+    started_at: string;
+    finished_at?: string | null;
+}
+
+export interface EasyTdxServer {
+    channel: 'standard' | 'mac';
+    host: string;
+    port: number;
+    selected: boolean;
+    status: 'online' | 'offline' | 'unknown';
+    latency_ms?: number;
+    checked_at?: string;
+    last_error?: string | null;
+    consecutive_failures?: number;
 }
 
 export interface FieldCoverageRow {
@@ -375,8 +432,97 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
-    async listSources(): Promise<{ sources: SourceSummary[]; timestamp: string }> {
+    async listSources(): Promise<{
+        sources: SourceSummary[];
+        sync_sources: DataSyncSource[];
+        timestamp: string;
+    }> {
         const resp = await this.axiosInstance.get('/admin/data-platform/sources');
+        return this.unwrap(resp);
+    }
+
+    async getSourceDatasets(sourceId: string): Promise<{
+        source_id: string;
+        data_dir: string;
+        datasets: DataSourceDataset[];
+        timestamp: string;
+    }> {
+        const resp = await this.axiosInstance.get(
+            `/admin/data-platform/sources/${sourceId}/datasets`,
+        );
+        return this.unwrap(resp);
+    }
+
+    async checkSourceUpdates(sourceId: string, datasets: string[]): Promise<any> {
+        const resp = await this.axiosInstance.post(
+            `/admin/data-platform/sources/${sourceId}/check-updates`,
+            { datasets },
+            { timeout: 120000 },
+        );
+        return this.unwrap(resp);
+    }
+
+    async createDataSourceSyncJob(payload: {
+        source_id: string;
+        market: string;
+        datasets: string[];
+        days: number;
+        symbols?: string[];
+        publish_mode?: 'shadow' | 'official';
+        with_pg?: boolean;
+        with_qlib?: boolean;
+    }): Promise<{ job: DataSourceSyncJob }> {
+        const resp = await this.axiosInstance.post('/admin/data-platform/sync-jobs', payload);
+        return this.unwrap(resp);
+    }
+
+    async getDataSourceSyncJob(jobId: string): Promise<{ job: DataSourceSyncJob }> {
+        const resp = await this.axiosInstance.get(`/admin/data-platform/sync-jobs/${jobId}`);
+        return this.unwrap(resp);
+    }
+
+    async cancelDataSourceSyncJob(jobId: string): Promise<{
+        job_id: string;
+        status: string;
+    }> {
+        const resp = await this.axiosInstance.post(
+            `/admin/data-platform/sync-jobs/${jobId}/cancel`,
+        );
+        return this.unwrap(resp);
+    }
+
+    async getEasyTdxServers(): Promise<{
+        available: boolean;
+        version?: string | null;
+        channels: Record<'standard' | 'mac', EasyTdxServer[]>;
+        timestamp: string;
+    }> {
+        const resp = await this.axiosInstance.get(
+            '/admin/data-platform/sources/easy_tdx/servers',
+        );
+        return this.unwrap(resp);
+    }
+
+    async testEasyTdxServers(
+        channel: 'standard' | 'mac',
+        host?: string,
+    ): Promise<{ servers: EasyTdxServer[] }> {
+        const resp = await this.axiosInstance.post(
+            '/admin/data-platform/sources/easy_tdx/servers/test',
+            { channel, host, timeout: 2 },
+            { timeout: 120000 },
+        );
+        return this.unwrap(resp);
+    }
+
+    async switchEasyTdxServer(
+        channel: 'standard' | 'mac',
+        host: string,
+    ): Promise<{ channel: string; host: string; switched_at: string }> {
+        const resp = await this.axiosInstance.post(
+            '/admin/data-platform/sources/easy_tdx/servers/switch',
+            { channel, host },
+        );
         return this.unwrap(resp);
     }
 

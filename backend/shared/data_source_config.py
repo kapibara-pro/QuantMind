@@ -27,6 +27,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MARKET_SOURCES = {
     "A": {
         "quantdb": {"label": "QuantDB A股", "default": True},
+        "easy_tdx": {"label": "easy_tdx 通达信行情", "default": True},
         "akshare": {"label": "akshare", "default": True},
         "hsgt_north": {"label": "北向资金(沪深港通)", "default": True},
         "hsgt_south": {"label": "南向资金(港股通)", "default": True},

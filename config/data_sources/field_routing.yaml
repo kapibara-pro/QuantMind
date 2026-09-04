@@ -20,9 +20,9 @@ markets:
   A:
     daily_kline:
       tier: T1
-      primary: quantdb_local
-      fallbacks: []
-      consensus: true
+      primary: easy_tdx
+      fallbacks: [quantdb_local]
+      consensus: false
       cleanup: true
     adj_factor:
       tier: T1
@@ -32,7 +32,13 @@ markets:
       cleanup: true
     minute_kline:
       tier: T2
-      primary: quantdb_local
+      primary: easy_tdx
+      fallbacks: [quantdb_local]
+      consensus: false
+      cleanup: true
+    realtime_quote:
+      tier: T3
+      primary: easy_tdx
       fallbacks: []
       consensus: false
       cleanup: true
@@ -74,8 +80,8 @@ markets:
       cleanup: false
     stock_list:
       tier: T1
-      primary: quantdb_local
-      fallbacks: []
+      primary: easy_tdx
+      fallbacks: [quantdb_local]
       consensus: false
       cleanup: false
     calendar:
