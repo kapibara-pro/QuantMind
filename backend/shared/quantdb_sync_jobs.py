@@ -118,9 +118,30 @@ def list_jobs() -> list[dict]:
     return jobs
 
 
-def new_celery_job(datasets: list[str] | None = None, with_pg: bool = False, with_qlib: bool = False) -> dict:
+def request_cancel(job_id: str) -> bool:
+    """请求取消一个运行中的 Redis 同步任务（协作式，由任务侧轮询生效）。"""
+    job = get_job(job_id)
+    if job is None or job.get("status") != "running":
+        return False
+    upsert_job(job_id, cancel_requested=True)
+    return True
+
+
+def cancel_requested(job_id: str) -> bool:
+    """判断 Redis 任务是否已被请求取消。"""
+    return bool((get_job(job_id) or {}).get("cancel_requested"))
+
+
+def new_celery_job(
+    datasets: list[str] | None = None,
+    with_pg: bool = False,
+    with_qlib: bool = False,
+    started_by: str = "celery-scheduler",
+) -> dict:
     """创建一个定时同步任务记录并写入 Redis，返回 job dict 与回调。"""
-    job_id = f"qdb-celery-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    import uuid
+
+    job_id = f"qdb-celery-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     job = {
         "job_id": job_id,
         "status": "running",
@@ -135,7 +156,7 @@ def new_celery_job(datasets: list[str] | None = None, with_pg: bool = False, wit
         "with_qlib": with_qlib,
         "cancel_requested": False,
         "started_at": _now_iso(),
-        "started_by": "celery-scheduler",
+        "started_by": started_by,
     }
     upsert_job(job["job_id"], **{k: v for k, v in job.items() if k != "job_id"})
     return job

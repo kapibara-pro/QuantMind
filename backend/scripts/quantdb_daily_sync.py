@@ -124,7 +124,7 @@ def _make_client():
 # ---------------------------------------------------------------------------
 # Phase 1: sync_dataset() → parquet
 # ---------------------------------------------------------------------------
-SYNC_WORKERS = 8
+SYNC_WORKERS = int(os.getenv("QUANTDB_SYNC_WORKERS", "2"))
 
 # SDK 把同步状态库放在 ~/.quantdb_state/，文件名由 save_dir 路径生成。
 # 容器内需挂载此目录（docker-compose 里已配置 volume）。

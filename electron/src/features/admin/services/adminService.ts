@@ -4,6 +4,8 @@ import {
     DashboardMetrics,
     SystemLoadSummary,
     AdminUser,
+    AdminUserCreateRequest,
+    AdminUserUpdateRequest,
     AIModel,
     ModelScanResult,
     ModelDirectoryInfo,
@@ -131,13 +133,15 @@ class AdminService {
     }
 
     // Users
-    async listUsers(query?: string, page = 1, pageSize = 20): Promise<AdminUser[]> {
+    async listUsers(query?: string, page = 1, pageSize = 20): Promise<{ items: AdminUser[]; total: number }> {
         const resp = await this.axiosInstance.get<any>('/admin/users/', {
             params: { query, page, page_size: pageSize }
         });
-        // 后端返回结构比较特殊，见 users.py
         if (resp.data.success && Array.isArray(resp.data.data)) {
-            return resp.data.data;
+            return {
+                items: resp.data.data,
+                total: Number(resp.data.meta?.total ?? resp.data.data.length),
+            };
         }
         throw new Error('获取用户列表失败');
     }
@@ -145,6 +149,28 @@ class AdminService {
     async toggleUserStatus(userId: string): Promise<boolean> {
         const resp = await this.axiosInstance.post<any>(`/admin/users/${userId}/toggle-status`);
         return resp.data.code === 200;
+    }
+
+    async createUser(data: AdminUserCreateRequest): Promise<AdminUser> {
+        const resp = await this.axiosInstance.post<any>('/admin/users/', data);
+        if (resp.data.code === 201 && resp.data.data) {
+            return resp.data.data;
+        }
+        throw new Error(resp.data.message || '创建用户失败');
+    }
+
+    async updateUser(userId: string, data: AdminUserUpdateRequest): Promise<AdminUser> {
+        const resp = await this.axiosInstance.put<any>(`/admin/users/${userId}`, data);
+        return this.unwrap<AdminUser>(resp.data);
+    }
+
+    async resetUserPassword(userId: string, newPassword: string): Promise<void> {
+        const resp = await this.axiosInstance.post<any>(`/admin/users/${userId}/password`, {
+            new_password: newPassword,
+        });
+        if (resp.data.code !== 200) {
+            throw new Error(resp.data.message || '重置密码失败');
+        }
     }
 
     // Model Management

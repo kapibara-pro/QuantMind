@@ -631,33 +631,6 @@ const LoginPage: React.FC = () => {
           </Form.Item>
         </Form>
 
-        {/* 注册链接 - 现代化设计 */}
-        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-          <Text style={{ fontSize: isMobile ? '14px' : '15px', color: '#666' }}>
-            还没有账号？
-            <Link
-              to="/auth/register"
-              style={{
-                marginLeft: '8px',
-                fontWeight: 600,
-                color: '#1890ff',
-                textDecoration: 'none',
-                transition: 'all 0.3s ease',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.color = '#722ed1';
-                e.currentTarget.style.transform = 'translateX(2px)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.color = '#1890ff';
-                e.currentTarget.style.transform = 'translateX(0)';
-              }}
-            >
-              立即注册
-            </Link>
-          </Text>
-        </div>
-
         {/* 安全提示 - 现代化 */}
         <div
           style={{

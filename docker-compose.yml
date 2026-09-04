@@ -66,6 +66,9 @@ services:
     #           count: all
     #           capabilities: [gpu]
     container_name: quantmind
+    # 内存硬上限：防止 API 进程在行情/分析页面 + 同步叠加时打满整机。
+    # 超过上限时只影响本容器（容器内进程被 OOM 终止），宿主机不再失去响应。
+    mem_limit: ${QM_API_MEM_LIMIT:-6g}
     depends_on:
       db:
         condition: service_healthy
@@ -80,6 +83,7 @@ services:
       # 应用配置
       - APP_EDITION=oss
       - APP_ENV=production
+      - ENABLE_PUBLIC_REGISTRATION=${ENABLE_PUBLIC_REGISTRATION:-false}
       - SERVICE_MODE=all
       - TZ=Asia/Shanghai
       - PYTHONPATH=/app
@@ -240,6 +244,10 @@ services:
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       # QuantDB 本地数据中枢（A 股优先数据源）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      # 管理台手动 QuantDB 同步队列（与回测/定时同步队列隔离）
+      - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
+      # QuantDB 下载并发（单数据集内文件级并发）
+      - QUANTDB_SYNC_WORKERS=${QUANTDB_SYNC_WORKERS:-2}
       # 市场分析快照目录（脚本 compute.py 产出后经 scp 部署到宿主机 ./data/market-analysis）
       - QM_MARKET_SNAPSHOT_DIR=/data/market-analysis
       # QuantUS / QuantHK 本地数据中枢（美股/港股，Yahoo Finance 摄取）
@@ -337,6 +345,7 @@ services:
     image: quantmind-oss:latest
     platform: linux/amd64
     container_name: quantmind-celery
+    mem_limit: ${QM_CELERY_MEM_LIMIT:-5g}
     depends_on:
       db:
         condition: service_healthy
@@ -421,6 +430,10 @@ services:
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       # QuantDB 同步状态库（避免容器内空库导致全量重下）
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
+      # 管理台手动 QuantDB 同步队列（与回测/定时同步队列隔离）
+      - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
+      # QuantDB 下载并发（单数据集内文件级并发）
+      - QUANTDB_SYNC_WORKERS=${QUANTDB_SYNC_WORKERS:-2}
 
       # Huntly 资讯 enrich (news_enrich_recent 任务在 worker 执行, 需要凭据)
       - HUNTLY_BASE_URL=${HUNTLY_BASE_URL:-http://quantmind-huntly}
@@ -466,6 +479,97 @@ services:
       # 用户股票池文件 (AI策略生成)
       - ./user_pools_local:/app/user_pools_local
     command: celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q ${QLIB_CELERY_QUEUE:-qlib_backtest_srv} --loglevel=info --concurrency=4
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery.*worker' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - quantmind-net
+
+  # 4a2. Celery Worker（QuantDB 管理台手动同步）
+  # 独立容器/内存上限，避免用户手动拉取 QuantDB 时与回测/期货定时任务
+  # 在同一进程池内叠加吃满内存；并发固定为 1，减少同时下载对磁盘/带宽压力。
+  celery-quantdb-worker:
+    image: quantmind-oss:latest
+    platform: linux/amd64
+    container_name: quantmind-celery-quantdb
+    mem_limit: ${QM_QUANTDB_WORKER_MEM_LIMIT:-4g}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 应用配置
+      - APP_EDITION=oss
+      - APP_ENV=production
+      - TZ=Asia/Shanghai
+      - PYTHONPATH=/app
+
+      # 数据库配置
+      - DB_DRIVER=asyncpg
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-quantmind}
+      - DB_USER=${DB_USER:-quantmind}
+      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-quantmind}:${DB_PASSWORD:-quantmind2026}@db:5432/${DB_NAME:-quantmind}
+
+      # psycopg2 直连配置（PG 填充等同步连接使用）
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${DB_USER:-quantmind}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-quantmind2026}
+      - POSTGRES_DB=${DB_NAME:-quantmind}
+
+      # Redis 配置
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+
+      # 存储配置
+      - STORAGE_MODE=local
+      - STORAGE_ROOT=/data
+
+      # 融资融券股票池文件路径（容器内）
+      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
+
+      # 统一报告根目录（技能中心）：复盘/市场分析/个股研究/股票池/投研报告
+      - QM_REPORTS_DIR=/data/reports
+      - TRADING_AGENTS_RESULTS_DIR=/data/reports/trading_agents
+
+      # QuantDB SDK（数据同步 + 特征快照生成）
+      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
+      - QM_QUANTDB_DATA_DIR=/data/quantdb
+      # QuantDB 同步状态库（避免容器内空库导致全量重下）
+      - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
+      # 管理台手动 QuantDB 同步队列
+      - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
+      # QuantDB 下载并发（单数据集内文件级并发）
+      - QUANTDB_SYNC_WORKERS=${QUANTDB_SYNC_WORKERS:-2}
+
+      # 数据同步定时任务（本 worker 不消费定时同步队列，保持与回测 worker 一致）
+      - DAILY_SYNC_ENABLED=true
+    volumes:
+      # 运行时数据
+      - ./data:/data
+      # AI 模型文件
+      - ./models:/app/models
+      # Qlib 历史数据
+      - ./db:/app/db
+      # 日志
+      - ./logs:/app/logs
+      # 后端代码
+      - ./backend:/app/backend
+      - ./config:/app/config
+      - ./scripts:/app/scripts
+      # 策略模板
+      - ./strategy_templates:/app/strategy_templates
+      # 用户股票池文件 (AI策略生成)
+      - ./user_pools_local:/app/user_pools_local
+    command: celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q ${QUANTDB_SYNC_QUEUE:-quantdb_sync} --loglevel=info --concurrency=${QUANTDB_SYNC_WORKER_CONCURRENCY:-1} -n quantdb_sync@%h
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'celery.*worker' || exit 1"]
       interval: 30s

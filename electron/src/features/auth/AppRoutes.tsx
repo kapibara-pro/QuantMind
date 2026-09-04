@@ -7,7 +7,6 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import {
   LazyLoginPage,
-  LazyRegisterPage,
   LazyForgotPasswordPage,
   LazyResetPasswordPage,
 } from './utils/lazyLoad';
@@ -21,7 +20,6 @@ const AppRoutes: React.FC = () => {
     <Routes>
       {/* 公开认证路由 */}
       <Route path="login" element={<LazyLoginPage />} />
-      <Route path="register" element={<LazyRegisterPage />} />
       <Route path="forgot-password" element={<LazyForgotPasswordPage />} />
       <Route path="reset-password" element={<LazyResetPasswordPage />} />
       <Route path="mfa/verify" element={<MFAVerificationPage />} />

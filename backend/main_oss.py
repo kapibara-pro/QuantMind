@@ -175,9 +175,13 @@ def run_single_service(service_name: str, port: int, workers: int = 1):
 
 
 def run_celery_worker():
-    """运行 Celery Worker（处理异步回测任务）"""
+    """运行 Celery Worker（处理异步回测任务）。
+
+    显式绑定 QLIB_CELERY_QUEUE：API 容器内的内嵌 worker 只消费回测队列，
+    不能因新增 task_queues 而顺带消费 quantdb_sync 等专用队列。
+    """
     from celery import concurrency
-    from backend.services.engine.qlib_app.celery_config import celery_app
+    from backend.services.engine.qlib_app.celery_config import CELERY_QUEUE, celery_app
 
     logger.info("Starting Celery Worker for async backtest tasks")
     # 使用 solo 模式单进程执行，避免多进程复杂度
@@ -186,6 +190,8 @@ def run_celery_worker():
         "--loglevel=info",
         "--concurrency=1",
         "--pool=solo",
+        "-Q",
+        CELERY_QUEUE,
     ])
 
 

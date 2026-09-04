@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Layout, Menu, Button, Badge, Avatar, Typography, Divider, Tag } from 'antd';
 import { 
     DashboardOutlined, 
@@ -19,7 +19,19 @@ const { Title, Text } = Typography;
 const AdminPage: React.FC = () => {
     const navigate = useNavigate();
     const location = useLocation();
-    const [collapsed, setCollapsed] = useState(false);
+    const [collapsed, setCollapsed] = useState(
+        () => typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches,
+    );
+
+    useEffect(() => {
+        const narrowViewport = window.matchMedia('(max-width: 767px)');
+        const syncSidebar = (event: MediaQueryListEvent | MediaQueryList) => {
+            setCollapsed(event.matches);
+        };
+        syncSidebar(narrowViewport);
+        narrowViewport.addEventListener('change', syncSidebar);
+        return () => narrowViewport.removeEventListener('change', syncSidebar);
+    }, []);
 
     const menuItems = [
         { 
@@ -86,8 +98,8 @@ const AdminPage: React.FC = () => {
     return (
         <div className="admin-page flex h-screen w-full bg-slate-50 overflow-hidden font-sans">
             {/* Sidebar */}
-            <div className={`flex flex-col h-full bg-white border-r border-slate-200 transition-all duration-300 ${collapsed ? 'w-20' : 'w-64'}`}>
-                <div className="p-6 flex items-center gap-3">
+            <div className={`shrink-0 flex flex-col h-full bg-white border-r border-slate-200 transition-all duration-300 ${collapsed ? 'w-20' : 'w-64'}`}>
+                <div className={`flex items-center gap-3 ${collapsed ? 'px-5 py-6 justify-center' : 'p-6'}`}>
                     <div className="w-9 h-9 bg-slate-900 rounded-lg flex items-center justify-center shrink-0 shadow-sm">
                         <RocketOutlined className="text-white text-lg" />
                     </div>
@@ -115,9 +127,9 @@ const AdminPage: React.FC = () => {
             </div>
 
             {/* Main Content Area */}
-            <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+            <div className="min-w-0 flex-1 flex flex-col h-full overflow-hidden relative">
                 {/* HeaderBar */}
-                <header className="h-16 bg-white border-b border-slate-200 px-8 flex items-center justify-between shrink-0">
+                <header className="h-16 bg-white border-b border-slate-200 px-3 sm:px-8 flex items-center justify-between shrink-0">
                     <div className="flex items-center gap-6">
                         <div className="flex items-center gap-2">
                             <Tag color="success" className="m-0 border-none rounded-full px-3 text-[10px] font-black uppercase bg-emerald-50 text-emerald-600">基础设施正常</Tag>
@@ -140,7 +152,7 @@ const AdminPage: React.FC = () => {
                 </header>
 
                 {/* Content Container */}
-                <main className="flex-1 overflow-y-auto px-6 pt-6 pb-[60px] bg-slate-50/50">
+                <main className="flex-1 overflow-y-auto px-2 sm:px-6 pt-6 pb-[60px] bg-slate-50/50">
                     {/* 资讯监控 / RD 因子挖掘等大屏页面用全宽，其余保留 1400px 阅读宽度 */}
                     <div
                         className={

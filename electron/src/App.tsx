@@ -154,7 +154,6 @@ export default function App() {
   // 定义公开路由列表
   const publicRoutes = [
     '/auth/login',
-    '/auth/register',
     '/auth/forgot-password',
     '/auth/reset-password',
     '/auth/mfa/verify',

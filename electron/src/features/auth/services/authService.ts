@@ -203,10 +203,7 @@ class AuthService {
   private setupInterceptors(): void {
     // 请求拦截器
     this.axiosInstance.interceptors.request.use(
-      (config) => {
-        console.log(`[Auth Request] ${config.method?.toUpperCase()} ${config.url}`, config.data);
-        return config;
-      },
+      (config) => config,
       (error) => {
         console.error('[Auth Request Error]', error);
         return Promise.reject(error);
@@ -215,10 +212,7 @@ class AuthService {
 
     // 响应拦截器
     this.axiosInstance.interceptors.response.use(
-      (response: AxiosResponse) => {
-        console.log(`[Auth Response] ${response.config.url}`, response.data);
-        return response;
-      },
+      (response: AxiosResponse) => response,
       async (error) => {
         return this.handle401Error(error, this.axiosInstance);
       }

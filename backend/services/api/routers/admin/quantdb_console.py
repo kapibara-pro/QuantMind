@@ -42,6 +42,12 @@ MAX_PREVIEW_ROWS = 200
 MAX_MANIFEST_FILES = 500
 MAX_SYMBOL_CHOICES = 500
 
+# /catalog 会递归统计 28 个数据集的 parquet 文件与大小，单次约 5-9 秒；
+# 页面加载/并发打开时会反复触发，这里做 60 秒内存缓存降低瞬时压力。
+CATALOG_CACHE_TTL_SECONDS = 60.0
+_catalog_cache_lock = threading.Lock()
+_catalog_cache: dict[str, Any] = {"ts": 0.0, "payload": None}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -125,6 +131,11 @@ def _dataset_stats(spec: DatasetSpec, root: Path) -> dict[str, Any]:
 @router.get("/catalog")
 async def get_catalog(current_user: dict = Depends(require_admin)):
     """返回数据集目录（按大类分组）+ 本地落盘统计。"""
+    now = time.monotonic()
+    with _catalog_cache_lock:
+        if _catalog_cache["payload"] is not None and now - _catalog_cache["ts"] < CATALOG_CACHE_TTL_SECONDS:
+            return _catalog_cache["payload"]
+
     try:
         root = _data_dir()
         items = []
@@ -151,7 +162,7 @@ async def get_catalog(current_user: dict = Depends(require_admin)):
                 "size_mb": round(sum(it["size_mb"] for it in members), 1),
             })
 
-        return {
+        payload = {
             "success": True,
             "data": {
                 "data_dir": str(root),
@@ -160,6 +171,10 @@ async def get_catalog(current_user: dict = Depends(require_admin)):
                 "timestamp": _now_iso(),
             },
         }
+        with _catalog_cache_lock:
+            _catalog_cache["ts"] = time.monotonic()
+            _catalog_cache["payload"] = payload
+        return payload
     except Exception as exc:  # noqa: BLE001
         logger.error("quantdb catalog failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"failed: {exc}")
@@ -778,34 +793,47 @@ async def sync_datasets(
     payload: SyncDatasetsRequest,
     current_user: dict = Depends(require_admin),
 ):
-    """按数据集触发增量同步（后台线程执行，返回 job_id 供轮询）。"""
+    """按数据集触发增量同步（Celery 后台任务执行，不占 API 进程内存）。
+
+    任务进度写入 Redis，前端仍通过 /sync-jobs 与 /sync-jobs/{id} 轮询；
+    取消信号也写入 Redis，由 Celery 任务侧协作式检查。
+    """
     for name in payload.datasets:
         _spec(name)
 
-    job_id = f"qdb-{next(_job_counter)}"
-    job = {
-        "job_id": job_id,
-        "status": "running",
-        "stage": "sync_parquet",
-        "datasets": list(payload.datasets),
-        "total": len(payload.datasets),
-        "done": 0,
-        "current": None,
-        "current_detail": None,
-        "results": [],
-        "with_pg": payload.with_pg,
-        "with_qlib": payload.with_qlib,
-        "cancel_requested": False,
-        "started_at": _now_iso(),
-        "started_by": current_user.get("username") or current_user.get("user_id"),
-    }
-    with _jobs_lock:
-        _jobs[job_id] = job
-        for stale in sorted(_jobs)[:-MAX_JOB_HISTORY]:
-            if _jobs[stale]["status"] != "running":
-                _jobs.pop(stale, None)
+    from backend.services.engine.qlib_app.celery_config import celery_app
+    from backend.shared.quantdb_sync_jobs import new_celery_job, upsert_job
 
-    threading.Thread(target=_run_sync_job, args=(job_id, payload), daemon=True).start()
+    job = new_celery_job(
+        datasets=list(payload.datasets),
+        with_pg=payload.with_pg,
+        with_qlib=payload.with_qlib,
+        started_by=current_user.get("username") or current_user.get("user_id") or "admin",
+    )
+    job_id = job["job_id"]
+    try:
+        celery_app.send_task(
+            "engine.tasks.run_quantdb_console_sync",
+            kwargs={
+                "job_id": job_id,
+                "datasets": list(payload.datasets),
+                "with_pg": payload.with_pg,
+                "with_qlib": payload.with_qlib,
+                "pg_full": payload.pg_full,
+            },
+            queue=os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("quantdb console sync enqueue failed: job=%s err=%s", job_id, exc, exc_info=True)
+        upsert_job(
+            job_id,
+            status="failed",
+            stage="enqueue_failed",
+            error=str(exc),
+            finished_at=_now_iso(),
+        )
+        raise HTTPException(status_code=502, detail=f"同步任务提交到后台失败: {exc}") from exc
+    logger.info("quantdb console sync enqueued: job=%s datasets=%s", job_id, payload.datasets)
     return {"success": True, "data": {"job": job}}
 
 
@@ -842,6 +870,28 @@ async def get_sync_job(job_id: str, current_user: dict = Depends(require_admin))
 @router.post("/sync-jobs/{job_id}/cancel")
 async def cancel_sync_job(job_id: str, current_user: dict = Depends(require_admin)):
     """取消正在运行的同步任务（协作式，当前数据集完成后停止）。"""
+    try:
+        from backend.shared.quantdb_sync_jobs import get_job as _redis_get_job
+        from backend.shared.quantdb_sync_jobs import request_cancel as _redis_request_cancel
+
+        redis_job = _redis_get_job(job_id)
+    except Exception:
+        redis_job = None
+    if redis_job is not None:
+        if redis_job.get("status") != "running":
+            raise HTTPException(status_code=400, detail=f"任务状态为 {redis_job['status']}，无法取消")
+        if not _redis_request_cancel(job_id):
+            raise HTTPException(status_code=409, detail="取消信号写入失败，任务可能已结束")
+        return {
+            "success": True,
+            "data": {
+                "job_id": job_id,
+                "status": "cancelling",
+                "message": "取消信号已发送，当前数据集完成后将停止",
+            },
+        }
+
+    # 兼容旧版 API 进程内存任务（代码热更新后仍可能短暂存在）
     with _jobs_lock:
         job = _jobs.get(job_id)
         if job is None:
