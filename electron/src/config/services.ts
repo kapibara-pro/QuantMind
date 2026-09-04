@@ -34,7 +34,7 @@ const LEGACY_SERVER_URL_STORAGE_KEY = 'quantmind_server_url';
 const DEFAULT_ELECTRON_API_BASE = 'http://127.0.0.1:8000';
 
 function readPersistedServerUrl(): string | null {
-  if (typeof window === 'undefined') return null;
+  if (typeof window === 'undefined' || !isElectronEnv()) return null;
   try {
     return localStorage.getItem(SERVER_URL_STORAGE_KEY)?.trim() || null;
   } catch {
@@ -43,7 +43,7 @@ function readPersistedServerUrl(): string | null {
 }
 
 function readLegacyPersistedServerUrl(): string | null {
-  if (typeof window === 'undefined') return null;
+  if (typeof window === 'undefined' || !isElectronEnv()) return null;
   try {
     return localStorage.getItem(LEGACY_SERVER_URL_STORAGE_KEY)?.trim() || null;
   } catch {
@@ -52,7 +52,7 @@ function readLegacyPersistedServerUrl(): string | null {
 }
 
 function persistServerUrl(url: string | null): void {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined' || !isElectronEnv()) return;
   try {
     if (url) {
       localStorage.setItem(SERVER_URL_STORAGE_KEY, url);
@@ -69,8 +69,26 @@ function persistServerUrl(url: string | null): void {
  * 检测是否为 Electron 桌面环境
  */
 export function isElectronEnv(): boolean {
-  return typeof window !== 'undefined' && typeof (window as any).electronAPI === 'object';
+  return (
+    typeof window !== 'undefined' &&
+    typeof (window as any).electronAPI === 'object' &&
+    typeof navigator !== 'undefined' &&
+    /Electron\//i.test(navigator.userAgent || '')
+  );
 }
+
+function clearWebServerUrlCache(): void {
+  if (typeof window === 'undefined' || isElectronEnv()) return;
+  try {
+    localStorage.removeItem(SERVER_URL_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_SERVER_URL_STORAGE_KEY);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+// Web builds use the current origin and Nginx proxy; old desktop-style URLs must not override it.
+clearWebServerUrlCache();
 
 /**
  * 校验服务器地址是否可达（通过 /health 端点）
@@ -115,6 +133,12 @@ async function clearStaleServerUrl(reason: string): Promise<void> {
  * 避免“隔段时间保存的 IP 丢失、需重新配置”的问题。
  */
 export async function initDynamicServerUrl(): Promise<void> {
+  if (!isElectronEnv()) {
+    dynamicServerUrl = null;
+    clearWebServerUrlCache();
+    return;
+  }
+
   // 1. 持久化配置：若探测可达则采用；若确认不可达，清除缓存并回退本机默认，
   //    避免换 IP/克隆部署到新机器后始终连旧地址导致“验证身份”卡死。
   const persisted = readPersistedServerUrl();
@@ -175,6 +199,11 @@ export async function initDynamicServerUrl(): Promise<void> {
  * 设置动态服务器配置（用户设置后调用）
  */
 export function setDynamicServerUrl(url: string): void {
+  if (!isElectronEnv()) {
+    dynamicServerUrl = null;
+    clearWebServerUrlCache();
+    return;
+  }
   dynamicServerUrl = url ? url.replace(/\/+$/, '') : null;
   persistServerUrl(dynamicServerUrl);
 }
@@ -183,6 +212,7 @@ export function setDynamicServerUrl(url: string): void {
  * 获取当前动态服务器配置
  */
 export function getDynamicServerUrl(): string | null {
+  if (!isElectronEnv()) return null;
   return dynamicServerUrl || readPersistedServerUrl();
 }
 
@@ -205,6 +235,11 @@ const API_BASE = normalizeBaseUrl(ENV.VITE_API_BASE_URL || '');
  * 获取基础 URL（优先使用动态配置）
  */
 function getBaseUrl(): string {
+  // Browser deployments stay on the current origin so Nginx can proxy /api and /ws.
+  if (!isElectronEnv()) {
+    return API_BASE;
+  }
+
   // 桌面端优先使用用户配置的服务器地址
   if (dynamicServerUrl) {
     return dynamicServerUrl;

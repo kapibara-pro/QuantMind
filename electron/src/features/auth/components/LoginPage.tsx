@@ -260,19 +260,13 @@ const LoginPage: React.FC = () => {
       return;
     }
 
-    // 仅在 Electron 桌面端补 :8000（直连后端）；
-    // Web 浏览器模式必须经 Nginx 代理（默认 :3080）以避免后端 CORS 拦截。
-    const isRealElectron =
-      typeof navigator !== 'undefined' && /Electron\//i.test(navigator.userAgent || '');
-    const port = isRealElectron ? 8000 : 3080;
-    const fullUrl = `http://${ip}:${port}`;
+    const fullUrl = `http://${ip}:8000`;
 
     setConfigLoading(true);
     try {
       setDynamicServerUrl(fullUrl);
 
-      // Electron 真环境才走 electronAPI；浏览器里 compat 层不可靠，吞掉错误即可
-      if (isRealElectron && (window as any).electronAPI?.setServerUrl) {
+      if ((window as any).electronAPI?.setServerUrl) {
         try {
           const result = await (window as any).electronAPI.setServerUrl(fullUrl);
           if (result && result.success === false) {
@@ -698,7 +692,7 @@ const LoginPage: React.FC = () => {
         <div style={{ marginBottom: '16px' }}>
           <Text type="secondary">
             请输入服务器 IP 地址。<br />
-            桌面端自动补 <code>:8000</code>，浏览器端自动补 <code>:3080</code>（经 Nginx 代理，避免 CORS）
+            桌面端将自动连接该服务器的 <code>:8000</code> API 端口
           </Text>
         </div>
         <Input

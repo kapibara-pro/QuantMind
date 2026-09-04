@@ -83,6 +83,7 @@ services:
       # 应用配置
       - APP_EDITION=oss
       - APP_ENV=production
+      - ENVIRONMENT=${ENVIRONMENT:-production}
       - ENABLE_PUBLIC_REGISTRATION=${ENABLE_PUBLIC_REGISTRATION:-false}
       - SERVICE_MODE=all
       - TZ=Asia/Shanghai
@@ -91,6 +92,7 @@ services:
       # 安全配置
       - SECRET_KEY=${SECRET_KEY:-changeme-generate-a-random-secret}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-generate-a-random-secret}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3080,http://localhost:3080}
 
       # 数据库配置
       - DB_DRIVER=asyncpg
