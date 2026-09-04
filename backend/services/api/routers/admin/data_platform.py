@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.services.api.user_app.middleware.auth import require_admin
 
@@ -242,10 +242,327 @@ async def list_sources(current_user: dict = Depends(require_admin)):
                     "error_rate_1h": health.get("error_rate_1h"),
                     "avg_latency_ms": health.get("avg_latency_ms"),
                 },
+                "metadata": adapter.describe(),
             })
-        return {"success": True, "data": {"sources": out, "timestamp": _now_iso()}}
+        from backend.services.engine.data_platform.source_catalog import (
+            list_source_descriptors,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "sources": out,
+                "sync_sources": list_source_descriptors(set(reg.list_sources())),
+                "timestamp": _now_iso(),
+            },
+        }
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# 数据源控制面：能力目录、更新检查、同步任务、easy_tdx 节点池
+# ---------------------------------------------------------------------------
+class SourceUpdateCheckRequest(BaseModel):
+    datasets: list[str] = Field(default_factory=list)
+
+
+class DataSourceSyncRequest(BaseModel):
+    source_id: str
+    market: str = "A"
+    datasets: list[str] = Field(default_factory=list)
+    days: int = Field(5, ge=1, le=3650)
+    symbols: list[str] = Field(default_factory=list)
+    publish_mode: str = "shadow"
+    with_pg: bool = False
+    with_qlib: bool = False
+
+
+class EasyTdxServerTestRequest(BaseModel):
+    channel: str = "mac"
+    host: str | None = None
+    timeout: float = Field(2.0, ge=0.2, le=10.0)
+
+
+class EasyTdxServerSwitchRequest(BaseModel):
+    channel: str = "mac"
+    host: str
+
+
+@router.get("/sources/{source_id}/datasets")
+async def source_datasets(
+    source_id: str,
+    current_user: dict = Depends(require_admin),
+):
+    try:
+        if source_id == "easy_tdx":
+            from backend.services.engine.data_platform.easy_tdx_sync import (
+                list_datasets,
+            )
+
+            datasets = list_datasets()
+            data_root = os.getenv("QM_EASY_TDX_DATA_DIR", "/data/easy_tdx")
+        elif source_id == "quantdb":
+            from backend.services.api.routers.admin.quantdb_console import DATASETS
+
+            datasets = [
+                {
+                    "dataset": item.dataset,
+                    "label": item.name,
+                    "default": item.dataset
+                    not in {"min1_kline", "min5_kline", "tick_data"},
+                }
+                for item in DATASETS
+            ]
+            data_root = os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
+        else:
+            raise HTTPException(status_code=404, detail=f"未知数据源: {source_id}")
+        return {
+            "success": True,
+            "data": {
+                "source_id": source_id,
+                "data_dir": data_root,
+                "datasets": datasets,
+                "timestamp": _now_iso(),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"failed: {exc}") from exc
+
+
+@router.post("/sources/{source_id}/check-updates")
+async def check_source_updates(
+    source_id: str,
+    payload: SourceUpdateCheckRequest,
+    current_user: dict = Depends(require_admin),
+):
+    try:
+        if source_id == "easy_tdx":
+            import asyncio
+
+            from backend.services.engine.data_platform.easy_tdx_sync import (
+                check_updates,
+            )
+
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, check_updates, payload.datasets or None
+            )
+            result["timestamp"] = _now_iso()
+            return {"success": True, "data": result}
+        if source_id == "quantdb":
+            from backend.services.api.routers.admin.quantdb_console import (
+                get_remote_diff,
+            )
+
+            response = await get_remote_diff(
+                datasets=",".join(payload.datasets) if payload.datasets else None,
+                current_user=current_user,
+            )
+            response.setdefault("data", {})["source_id"] = "quantdb"
+            return response
+        raise HTTPException(status_code=404, detail=f"未知数据源: {source_id}")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("source update check failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/sync-jobs")
+async def create_data_source_sync_job(
+    payload: DataSourceSyncRequest,
+    current_user: dict = Depends(require_admin),
+):
+    from backend.services.engine.data_platform.source_catalog import (
+        get_source_descriptor,
+    )
+
+    try:
+        descriptor = get_source_descriptor(payload.source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if payload.market.upper() not in descriptor.markets:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{payload.source_id} 不支持市场 {payload.market}",
+        )
+    if payload.datasets:
+        if payload.source_id == "easy_tdx":
+            from backend.services.engine.data_platform.easy_tdx_sync import DATASETS
+
+            known_datasets = set(DATASETS)
+        else:
+            from backend.services.api.routers.admin.quantdb_console import (
+                DATASETS as QUANTDB_DATASETS,
+            )
+
+            known_datasets = {item.dataset for item in QUANTDB_DATASETS}
+        unknown = [name for name in payload.datasets if name not in known_datasets]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{payload.source_id} 不支持数据集: {unknown[0]}",
+            )
+    if payload.source_id == "easy_tdx":
+        if payload.publish_mode != "shadow":
+            raise HTTPException(status_code=400, detail="easy_tdx 第一版仅支持影子落盘")
+        if payload.with_pg or payload.with_qlib:
+            raise HTTPException(
+                status_code=400,
+                detail="easy_tdx 尚未完成因子质量门禁，不能直接写 PG 或 Qlib",
+            )
+
+    from backend.services.engine.qlib_app.celery_config import celery_app
+    from backend.shared.data_sync_jobs import create_job, upsert_job
+
+    try:
+        job = create_job(
+            source_id=payload.source_id,
+            market=payload.market.upper(),
+            datasets=list(payload.datasets),
+            days=payload.days,
+            symbols=list(payload.symbols),
+            publish_mode=payload.publish_mode,
+            with_pg=payload.with_pg,
+            with_qlib=payload.with_qlib,
+            started_by=current_user.get("username")
+            or current_user.get("user_id")
+            or "admin",
+        )
+        queue = (
+            os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync")
+            if payload.source_id == "quantdb"
+            else os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv")
+        )
+        celery_app.send_task(
+            "engine.tasks.run_data_source_sync",
+            kwargs={"job_id": job["job_id"]},
+            queue=queue,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if "job" in locals():
+            upsert_job(
+                job["job_id"],
+                status="failed",
+                stage="enqueue_failed",
+                error=str(exc),
+                finished_at=_now_iso(),
+            )
+        raise HTTPException(status_code=502, detail=f"同步任务派发失败: {exc}") from exc
+    return {"success": True, "data": {"job": job}}
+
+
+@router.get("/sync-jobs")
+async def list_data_source_sync_jobs(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(require_admin),
+):
+    from backend.shared.data_sync_jobs import list_jobs
+
+    return {
+        "success": True,
+        "data": {"jobs": list_jobs(limit), "timestamp": _now_iso()},
+    }
+
+
+@router.get("/sync-jobs/{job_id}")
+async def get_data_source_sync_job(
+    job_id: str,
+    current_user: dict = Depends(require_admin),
+):
+    from backend.shared.data_sync_jobs import get_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
+    return {"success": True, "data": {"job": job}}
+
+
+@router.post("/sync-jobs/{job_id}/cancel")
+async def cancel_data_source_sync_job(
+    job_id: str,
+    current_user: dict = Depends(require_admin),
+):
+    from backend.shared.data_sync_jobs import request_cancel
+
+    if not request_cancel(job_id):
+        raise HTTPException(status_code=409, detail="任务不存在或已经结束")
+    return {
+        "success": True,
+        "data": {"job_id": job_id, "status": "cancelling"},
+    }
+
+
+@router.get("/sources/easy_tdx/servers")
+async def list_easy_tdx_servers(current_user: dict = Depends(require_admin)):
+    from backend.services.engine.data_platform.easy_tdx_client import (
+        get_easy_tdx_manager,
+    )
+
+    manager = get_easy_tdx_manager()
+    try:
+        return {
+            "success": True,
+            "data": {
+                "available": manager.available,
+                "version": manager.library_version,
+                "channels": {
+                    channel: manager.list_servers(channel)
+                    for channel in ("standard", "mac")
+                }
+                if manager.available
+                else {},
+                "timestamp": _now_iso(),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/sources/easy_tdx/servers/test")
+async def test_easy_tdx_servers(
+    payload: EasyTdxServerTestRequest,
+    current_user: dict = Depends(require_admin),
+):
+    import asyncio
+
+    from backend.services.engine.data_platform.easy_tdx_client import (
+        get_easy_tdx_manager,
+    )
+
+    try:
+        manager = get_easy_tdx_manager()
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: manager.test_servers(
+                payload.channel, payload.host, payload.timeout
+            ),
+        )
+        return {"success": True, "data": {"servers": result}}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/sources/easy_tdx/servers/switch")
+async def switch_easy_tdx_server(
+    payload: EasyTdxServerSwitchRequest,
+    current_user: dict = Depends(require_admin),
+):
+    from backend.services.engine.data_platform.easy_tdx_client import (
+        get_easy_tdx_manager,
+    )
+
+    try:
+        result = get_easy_tdx_manager().switch_server(payload.channel, payload.host)
+        return {"success": True, "data": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/sources/{name}/health")
@@ -643,7 +960,11 @@ async def sweep_market(
 # ---------------------------------------------------------------------------
 class DailySyncRequest(BaseModel):
     market: str = "A"
-    symbols: list[str] = []
+    source_id: str = "quantdb"
+    symbols: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    days: int = Field(5, ge=1, le=3650)
+    publish_mode: str = "shadow"
     calibrate: bool = True
 
 
@@ -654,9 +975,21 @@ async def trigger_daily_sync(
 ):
     """异步提交统一数据同步任务到 Celery，立即返回 task_id。
 
-    A 股固定走 QuantDB 增量同步（parquet → PG → Qlib 缓存），不再支持全量模式。
+    A 股可选择 QuantDB 或 easy_tdx；easy_tdx 固定写入独立影子目录。
     """
     try:
+        if payload.source_id != "quantdb":
+            return await create_data_source_sync_job(
+                DataSourceSyncRequest(
+                    source_id=payload.source_id,
+                    market=payload.market,
+                    datasets=payload.datasets,
+                    days=payload.days,
+                    symbols=payload.symbols,
+                    publish_mode=payload.publish_mode,
+                ),
+                current_user,
+            )
         from backend.services.engine.tasks.celery_tasks import daily_data_sync_task
 
         symbols_str = ",".join(payload.symbols) if payload.symbols else ""

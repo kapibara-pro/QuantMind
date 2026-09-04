@@ -39,6 +39,9 @@ class QuantDBLocalAdapter(OfflineDataSourceAdapter):
 
     name = "quantdb_local"
     markets = ["A"]
+    category = "research_data"
+    transport = "parquet"
+    delivery_modes = {"batch"}
     fields = {
         "daily_kline",
         "minute_kline",

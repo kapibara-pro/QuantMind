@@ -33,6 +33,8 @@ DEFAULT_SCHEDULE = {
     "time": "03:00",
     "days": 5,
     "datasets": [],
+    "source_id": "quantdb",
+    "publish_mode": "shadow",
     "with_qlib": False,
 }
 
@@ -116,14 +118,39 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     """执行指定市场的同步（按配置的数据集/天数）。"""
     days = int(cfg.get("days") or 5)
     datasets = cfg.get("datasets") or []
+    source_id = str(cfg.get("source_id") or "quantdb")
+    publish_mode = str(cfg.get("publish_mode") or "shadow")
     with_qlib = bool(cfg.get("with_qlib"))
 
-    result: dict[str, Any] = {"market": market, "started": datetime.now().isoformat()}
+    result: dict[str, Any] = {
+        "market": market,
+        "source_id": source_id,
+        "started": datetime.now().isoformat(),
+    }
 
     if market == "A":
+        if source_id == "easy_tdx":
+            if with_qlib:
+                raise ValueError("easy_tdx 影子数据尚不能直接重建 Qlib")
+            from backend.services.engine.data_platform.easy_tdx_sync import sync
+
+            result["result"] = sync(
+                datasets=datasets or None,
+                days=days,
+                publish_mode=publish_mode,
+            )
+            result["finished"] = datetime.now().isoformat()
+            return result
+        if source_id != "quantdb":
+            raise ValueError(f"A 股不支持定时同步数据源: {source_id}")
         from backend.scripts.quantdb_daily_sync import run_daily_sync
 
-        result["result"] = run_daily_sync(skip_pg=True)
+        result["result"] = run_daily_sync(
+            datasets=datasets or None,
+            skip_pg=True,
+            skip_qlib=not with_qlib,
+        )
+        result["finished"] = datetime.now().isoformat()
         return result
 
     if market == "US":

@@ -1224,6 +1224,83 @@ def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any
         return {"market": market, "status": "failed", "error": str(e)}
 
 
+@celery_app.task(
+    name="engine.tasks.run_data_source_sync",
+    max_retries=0,
+    time_limit=int(os.getenv("DATA_SOURCE_SYNC_TIME_LIMIT", "21600")),
+    soft_time_limit=int(os.getenv("DATA_SOURCE_SYNC_SOFT_TIME_LIMIT", "19800")),
+)
+def run_data_source_sync(job_id: str) -> dict[str, Any]:
+    """执行管理端提交的通用数据源同步任务。"""
+    from backend.shared.data_sync_jobs import (
+        _now_iso,
+        cancel_requested,
+        get_job,
+        progress_callback,
+        upsert_job,
+    )
+
+    job = get_job(job_id)
+    if job is None:
+        return {"status": "failed", "error": f"同步任务不存在: {job_id}"}
+    if job.get("cancel_requested"):
+        upsert_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            finished_at=_now_iso(),
+        )
+        return {"status": "cancelled", "job_id": job_id}
+
+    source_id = str(job.get("source_id"))
+    upsert_job(job_id, status="running", stage="starting", current="初始化数据源")
+    try:
+        if source_id == "easy_tdx":
+            from backend.services.engine.data_platform.easy_tdx_sync import sync
+
+            result = sync(
+                datasets=job.get("datasets") or None,
+                days=int(job.get("days") or 5),
+                symbols=job.get("symbols") or None,
+                publish_mode=str(job.get("publish_mode") or "shadow"),
+                progress_cb=progress_callback(job_id),
+                should_cancel=lambda: cancel_requested(job_id),
+            )
+        elif source_id == "quantdb":
+            from backend.scripts.quantdb_daily_sync import run_daily_sync
+
+            result = run_daily_sync(
+                datasets=job.get("datasets") or None,
+                skip_pg=not bool(job.get("with_pg")),
+                skip_qlib=not bool(job.get("with_qlib")),
+            )
+        else:
+            raise ValueError(f"未知数据源: {source_id}")
+
+        cancelled = cancel_requested(job_id) or bool(result.get("cancelled"))
+        status = "cancelled" if cancelled else "completed"
+        upsert_job(
+            job_id,
+            status=status,
+            stage=status,
+            current=None,
+            result=result,
+            finished_at=_now_iso(),
+        )
+        return {"status": status, "job_id": job_id, "result": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[DataSourceSync] %s 同步失败: %s", source_id, exc)
+        upsert_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            current=None,
+            error=str(exc),
+            finished_at=_now_iso(),
+        )
+        return {"status": "failed", "job_id": job_id, "error": str(exc)}
+
+
 @celery_app.task(name="engine.tasks.market_snapshot")
 def run_market_snapshot() -> dict[str, Any]:
     """在服务器容器内计算市场分析快照，写入 QM_MARKET_SNAPSHOT_DIR。

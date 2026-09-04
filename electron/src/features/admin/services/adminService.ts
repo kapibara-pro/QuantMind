@@ -309,12 +309,20 @@ class AdminService {
 
     async triggerDailySync(params?: {
         market?: string;
+        sourceId?: 'quantdb' | 'easy_tdx';
         symbols?: string[];
+        datasets?: string[];
+        days?: number;
+        publishMode?: 'shadow' | 'official';
         calibrate?: boolean;
     }): Promise<any> {
         const resp = await this.axiosInstance.post('/admin/data-platform/daily-sync', {
             market: params?.market || 'A',
+            source_id: params?.sourceId || 'quantdb',
             symbols: params?.symbols || [],
+            datasets: params?.datasets || [],
+            days: params?.days || 5,
+            publish_mode: params?.publishMode || 'shadow',
             calibrate: params?.calibrate ?? true,
         }, { timeout: 30000 });
         return resp.data;
@@ -400,6 +408,8 @@ class AdminService {
         time: string;
         days: number;
         datasets: string[];
+        source_id?: 'quantdb' | 'easy_tdx';
+        publish_mode?: 'shadow' | 'official';
         with_qlib?: boolean;
     }): Promise<any> {
         const resp = await this.axiosInstance.post(`/admin/data-platform/sync-schedule/${market}`, cfg);

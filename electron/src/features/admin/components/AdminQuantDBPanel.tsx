@@ -18,6 +18,7 @@ import { QuantDBCatalogPanel } from './quantdb/QuantDBCatalogPanel';
 import { QuantDBPreviewDrawer } from './quantdb/QuantDBPreviewDrawer';
 import { describeError } from './quantdb/utils';
 import { SyncSchedulePanel } from './data-management/SyncSchedulePanel';
+import { AShareDataSourcePanel } from './data-management/AShareDataSourcePanel';
 
 const { Text } = Typography;
 
@@ -219,7 +220,7 @@ export const AdminQuantDBPanel: React.FC = () => {
                     <Space>
                         <DatabaseOutlined />
                         <Text strong>数据源</Text>
-                        <Text type="secondary" className="text-xs">默认 QuantDB A股/akshare/北向/南向；雅虎默认关闭不勾选</Text>
+                        <Text type="secondary" className="text-xs">QuantDB 提供研究数据与因子，easy_tdx 提供 A 股行情；其他来源按需补充</Text>
                     </Space>
                     <Space wrap size="small">
                         {sources.map((s) => (
@@ -264,6 +265,8 @@ export const AdminQuantDBPanel: React.FC = () => {
                     前往「个人中心 - 数据平台」绑定或更新密钥 →
                 </Button>
             </div>
+
+            <AShareDataSourcePanel />
 
             {/* 定时同步调度面板（建议次日 00:00 以后按需错峰，具体时间以前端设置为准） */}
             <SyncSchedulePanel market="A" defaultDays={5} />
