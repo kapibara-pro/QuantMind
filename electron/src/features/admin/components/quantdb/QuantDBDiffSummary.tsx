@@ -14,6 +14,7 @@ const { Text } = Typography;
 interface QuantDBDiffSummaryProps {
     diff: QuantDBDiffResult | null;
     loading: boolean;
+    remoteEnabled: boolean;
     onCheckUpdates: () => void;
     onSyncSelected: (datasets: string[]) => void;
 }
@@ -35,6 +36,7 @@ function formatRemoteDate(date: string | null | undefined): string {
 export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
     diff,
     loading,
+    remoteEnabled,
     onCheckUpdates,
     onSyncSelected,
 }) => {
@@ -69,11 +71,12 @@ export const QuantDBDiffSummary: React.FC<QuantDBDiffSummaryProps> = ({
                         icon={loading ? <SyncOutlined spin /> : <CloudSyncOutlined />}
                         onClick={onCheckUpdates}
                         loading={loading}
+                        disabled={!remoteEnabled}
                         size="small"
                     >
                         {diff ? '重新检查' : '检查更新'}
                     </Button>
-                    {syncableDatasets.length > 0 && (
+                    {remoteEnabled && syncableDatasets.length > 0 && (
                         <Button
                             type="primary"
                             size="small"

@@ -106,6 +106,7 @@ export const AdminQuantDBPanel: React.FC = () => {
     const usagePercent = info?.usage && info.usage.limit_gb > 0
         ? Math.round((info.usage.used_gb / info.usage.limit_gb) * 100)
         : 0;
+    const quantdbEnabled = sources.find((item) => item.source === 'quantdb')?.enabled ?? false;
 
     return (
         <div className="space-y-4">
@@ -274,6 +275,7 @@ export const AdminQuantDBPanel: React.FC = () => {
             {/* QuantDB 数据集目录与详情 */}
             <QuantDBCatalogPanel
                 connected={Boolean(info?.connected)}
+                enabled={quantdbEnabled}
                 onPreview={setPreviewDataset}
                 refreshSignal={catalogRefreshSignal}
             />
