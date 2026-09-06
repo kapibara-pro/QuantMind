@@ -72,6 +72,8 @@ SOURCE_CATALOG: dict[str, SourceDescriptor] = {
             "daily_unadjusted",
             "daily_forward",
             "daily_backward",
+            "min5_kline",
+            "min1_kline",
             "stock_list",
         ),
         managed_service=True,

@@ -663,6 +663,7 @@ def _run_manifest_fallback(
 
 def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
     from backend.scripts.quantdb_daily_sync import run_daily_sync
+    from backend.shared.quantdb_sync_jobs import build_dataset_results
 
     # 取消检查辅助
     def _cancelled() -> bool:
@@ -719,35 +720,8 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
         _job_update(job_id, status="failed", error=str(exc), finished_at=_now_iso())
         return
 
-    # 将 parquet 同步结果映射到 job results
-    parquet_info = sync_result.get("parquet") or {}
-    synced_count = parquet_info.get("synced", 0)
-    parquet_info.get("up_to_date", 0)
-    errors = parquet_info.get("errors", [])
-    parquet_info.get("total_downloaded", 0)
-    sources_info = sync_result.get("sources") or {}
-
-    results = []
     cancelled = _cancelled()
-    for name in req.datasets:
-        src = sources_info.get(name)
-        if src is not None:
-            if src.get("status") == "error":
-                results.append({"dataset": name, "status": "failed", "downloaded": 0,
-                                "error": str(src.get("error", "unknown"))})
-            elif src.get("synced", 0) > 0 or src.get("status") in ("ok", "completed"):
-                results.append({"dataset": name, "status": "synced", "downloaded": src.get("synced", 1)})
-            else:
-                results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
-        elif cancelled:
-            results.append({"dataset": name, "status": "skipped", "downloaded": 0,
-                            "reason": "用户取消"})
-        elif any(name in str(e) for e in errors):
-            results.append({"dataset": name, "status": "failed", "downloaded": 0, "error": next((e for e in errors if name in str(e)), "unknown")})
-        elif synced_count > 0:
-            results.append({"dataset": name, "status": "synced", "downloaded": 1})
-        else:
-            results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+    results = build_dataset_results(req.datasets, sync_result, cancelled=cancelled)
 
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -758,6 +732,21 @@ def _run_sync_job(job_id: str, req: SyncDatasetsRequest) -> None:
 
     if cancelled:
         _job_update(job_id, status="cancelled", current=None, finished_at=_now_iso())
+        return
+
+    failed = [item for item in results if item.get("status") == "failed"]
+    if failed:
+        error = "; ".join(
+            f"{item['dataset']}: {item.get('error', '同步失败')}" for item in failed
+        )
+        _job_update(
+            job_id,
+            status="failed",
+            stage="done",
+            current=None,
+            error=error,
+            finished_at=_now_iso(),
+        )
         return
 
     # Phase 2: PG 填充
@@ -798,6 +787,13 @@ async def sync_datasets(
     任务进度写入 Redis，前端仍通过 /sync-jobs 与 /sync-jobs/{id} 轮询；
     取消信号也写入 Redis，由 Celery 任务侧协作式检查。
     """
+    from backend.shared.data_source_config import is_source_enabled
+
+    if not is_source_enabled("A", "quantdb"):
+        raise HTTPException(
+            status_code=409,
+            detail="QuantDB 数据源未启用，请选择 easy_tdx 或先启用 QuantDB",
+        )
     for name in payload.datasets:
         _spec(name)
 
