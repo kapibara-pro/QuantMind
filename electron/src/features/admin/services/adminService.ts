@@ -416,8 +416,19 @@ class AdminService {
         return resp.data;
     }
 
-    async runSyncScheduleNow(market: string): Promise<any> {
-        const resp = await this.axiosInstance.post(`/admin/data-platform/sync-schedule/${market}/run`);
+    async runSyncScheduleNow(market: string, cfg?: {
+        enabled: boolean;
+        time: string;
+        days: number;
+        datasets: string[];
+        source_id?: 'quantdb' | 'easy_tdx';
+        publish_mode?: 'shadow' | 'official';
+        with_qlib?: boolean;
+    }): Promise<any> {
+        const resp = await this.axiosInstance.post(
+            `/admin/data-platform/sync-schedule/${market}/run`,
+            cfg,
+        );
         return resp.data;
     }
 

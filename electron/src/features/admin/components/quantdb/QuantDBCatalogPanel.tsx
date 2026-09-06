@@ -88,6 +88,10 @@ export function QuantDBCatalogPanel({ connected, enabled, onPreview, refreshSign
     }, []);
 
     const loadLatestJob = useCallback(async () => {
+        if (!remoteEnabled) {
+            setActiveJob(null);
+            return null;
+        }
         try {
             const resp = await dataPlatformService.listQuantDBSyncJobs();
             setActiveJob(resp.jobs[0] ?? null);
@@ -96,7 +100,7 @@ export function QuantDBCatalogPanel({ connected, enabled, onPreview, refreshSign
             console.error('[QuantDBCatalogPanel] loadLatestJob failed:', err);
             return null;
         }
-    }, []);
+    }, [remoteEnabled]);
 
     useEffect(() => {
         loadCatalog();
@@ -114,6 +118,7 @@ export function QuantDBCatalogPanel({ connected, enabled, onPreview, refreshSign
         if (!remoteEnabled) {
             setDiff(null);
             setDiffLoading(false);
+            setActiveJob(null);
         }
     }, [remoteEnabled]);
 
