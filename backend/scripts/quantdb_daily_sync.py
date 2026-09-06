@@ -86,6 +86,8 @@ FULL_REWRITE_V2_DATASETS = {
 
 # V1 非分区数据集 (全量 ETag 增量)
 V1_DATASETS = [
+    {"category_id": "1", "sub_category": "min5_kline", "dir": "1_kline_data"},
+    {"category_id": "1", "sub_category": "min1_kline", "dir": "1_kline_data"},
     {"category_id": "2", "sub_category": "sector_concept", "dir": "2_base_sector"},
     {"category_id": "2", "sub_category": "instrument_detail", "dir": "2_base_sector"},
     {"category_id": "2", "sub_category": "index_weights", "dir": "2_base_sector"},
@@ -97,6 +99,14 @@ V1_DATASETS = [
     {"category_id": "3", "sub_category": "pershare_index", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "dividend_factors", "dir": "3_financial_data"},
     {"category_id": "3", "sub_category": "holder_num", "dir": "3_financial_data"},
+]
+
+# 分钟线体积大，只在管理端/CLI 显式选择时同步，不加入每日默认任务。
+MANUAL_ONLY_DATASETS = {"min1_kline", "min5_kline"}
+DEFAULT_SYNC_DATASETS = [
+    item
+    for item in V2_DATASETS + V1_DATASETS
+    if item["sub_category"] not in MANUAL_ONLY_DATASETS
 ]
 
 # DB config
@@ -559,7 +569,7 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
     整个数据集中断。这里改为自行下载 + 哈希校验，并跳过 patches 对象。
     """
     if datasets is None:
-        datasets = V2_DATASETS + V1_DATASETS
+        datasets = DEFAULT_SYNC_DATASETS
 
     if dry_run:
         log.info("dry-run: 跳过实际下载")
@@ -567,7 +577,13 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
 
     client = _make_client()
     state = _open_state()
-    results = {"synced": 0, "up_to_date": 0, "errors": [], "total_downloaded": 0}
+    results = {
+        "synced": 0,
+        "up_to_date": 0,
+        "errors": [],
+        "total_downloaded": 0,
+        "per_dataset": {},
+    }
 
     for idx, ds in enumerate(datasets):
         sub, cat_id = ds["sub_category"], ds["category_id"]
@@ -594,8 +610,21 @@ def sync_parquet(datasets: list[dict] | None = None, *, dry_run: bool = False, p
                 log.info("[OK] %s: 已最新", sub)
             if errs:
                 results["errors"].append(f"{sub}: {errs} 个对象下载失败")
+            results["per_dataset"][sub] = {
+                "status": "partial" if done and errs else (
+                    "failed" if errs else "synced" if done else "up_to_date"
+                ),
+                "downloaded": done,
+                "errors": errs,
+            }
         except Exception as exc:
             results["errors"].append(f"{sub}: {exc}")
+            results["per_dataset"][sub] = {
+                "status": "failed",
+                "downloaded": 0,
+                "errors": 1,
+                "error": str(exc),
+            }
             log.warning("[FAIL] %s: %s", sub, exc)
             client = _make_client()
 

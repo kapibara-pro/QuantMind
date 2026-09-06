@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from typing import Any
 
 KEY_PREFIX = "quantmind:quantdb:job:"
 TTL = 6 * 3600  # 任务记录保留 6 小时
@@ -188,3 +189,89 @@ def celery_progress_cb(job_id: str):
             upsert_job(job_id, **fields)
 
     return _cb
+
+
+def build_dataset_results(
+    datasets: list[str], sync_result: dict[str, Any], *, cancelled: bool = False
+) -> list[dict[str, Any]]:
+    """Map explicit per-dataset outcomes without treating skipped work as current."""
+    parquet_info = sync_result.get("parquet") or {}
+    per_dataset = parquet_info.get("per_dataset") or {}
+    errors = parquet_info.get("errors") or []
+    sources_info = sync_result.get("sources") or {}
+    results: list[dict[str, Any]] = []
+
+    for name in datasets:
+        source = sources_info.get(name)
+        if source is not None:
+            if source.get("status") == "error":
+                results.append(
+                    {
+                        "dataset": name,
+                        "status": "failed",
+                        "downloaded": 0,
+                        "error": str(source.get("error", "unknown")),
+                    }
+                )
+            elif source.get("synced", 0) > 0 or source.get("status") in {
+                "ok",
+                "completed",
+            }:
+                results.append(
+                    {
+                        "dataset": name,
+                        "status": "synced",
+                        "downloaded": source.get("synced", 1),
+                    }
+                )
+            else:
+                results.append(
+                    {"dataset": name, "status": "up_to_date", "downloaded": 0}
+                )
+            continue
+
+        if cancelled:
+            results.append(
+                {
+                    "dataset": name,
+                    "status": "skipped",
+                    "downloaded": 0,
+                    "reason": "用户取消",
+                }
+            )
+            continue
+
+        detail = per_dataset.get(name)
+        if detail is None:
+            error = next((item for item in errors if name in str(item)), None)
+            results.append(
+                {
+                    "dataset": name,
+                    "status": "failed",
+                    "downloaded": 0,
+                    "error": str(error or "同步流程未处理该数据集"),
+                }
+            )
+        elif detail.get("status") == "synced":
+            results.append(
+                {
+                    "dataset": name,
+                    "status": "synced",
+                    "downloaded": detail.get("downloaded", 0),
+                }
+            )
+        elif detail.get("status") == "up_to_date":
+            results.append(
+                {"dataset": name, "status": "up_to_date", "downloaded": 0}
+            )
+        else:
+            results.append(
+                {
+                    "dataset": name,
+                    "status": "failed",
+                    "downloaded": detail.get("downloaded", 0),
+                    "error": detail.get("error")
+                    or f"{detail.get('errors', 0)} 个对象下载失败",
+                }
+            )
+    return results

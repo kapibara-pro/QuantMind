@@ -838,6 +838,7 @@ def run_quantdb_console_sync_task(
     from backend.scripts.quantdb_daily_sync import run_daily_sync
     from backend.shared.quantdb_sync_jobs import (
         _now_iso,
+        build_dataset_results,
         cancel_requested,
         celery_progress_cb,
         upsert_job,
@@ -867,43 +868,8 @@ def run_quantdb_console_sync_task(
         _set(status="failed", stage="sync_parquet", error=str(exc), finished_at=_now_iso())
         return {"status": "failed", "error": str(exc)}
 
-    # parquet 阶段结果 -> job results（与旧 API 内存任务保持同样展示格式）
-    parquet_info = sync_result.get("parquet") or {}
-    synced_count = parquet_info.get("synced", 0)
-    errors = parquet_info.get("errors", [])
-    sources_info = sync_result.get("sources") or {}
-
-    results: list[dict[str, Any]] = []
     cancelled = _cancelled()
-    for name in datasets:
-        src = sources_info.get(name)
-        if src is not None:
-            if src.get("status") == "error":
-                results.append({
-                    "dataset": name, "status": "failed", "downloaded": 0,
-                    "error": str(src.get("error", "unknown")),
-                })
-            elif src.get("synced", 0) > 0 or src.get("status") in ("ok", "completed"):
-                results.append({
-                    "dataset": name, "status": "synced",
-                    "downloaded": src.get("synced", 1),
-                })
-            else:
-                results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
-        elif cancelled:
-            results.append({
-                "dataset": name, "status": "skipped", "downloaded": 0,
-                "reason": "用户取消",
-            })
-        elif any(name in str(e) for e in errors):
-            results.append({
-                "dataset": name, "status": "failed", "downloaded": 0,
-                "error": next((e for e in errors if name in str(e)), "unknown"),
-            })
-        elif synced_count > 0:
-            results.append({"dataset": name, "status": "synced", "downloaded": 1})
-        else:
-            results.append({"dataset": name, "status": "up_to_date", "downloaded": 0})
+    results = build_dataset_results(datasets, sync_result, cancelled=cancelled)
 
     _set(
         results=results,
@@ -913,6 +879,20 @@ def run_quantdb_console_sync_task(
     if cancelled:
         _set(status="cancelled", stage="done", current=None, finished_at=_now_iso())
         return {"status": "cancelled"}
+
+    failed = [item for item in results if item.get("status") == "failed"]
+    if failed:
+        error = "; ".join(
+            f"{item['dataset']}: {item.get('error', '同步失败')}" for item in failed
+        )
+        _set(
+            status="failed",
+            stage="done",
+            current=None,
+            error=error,
+            finished_at=_now_iso(),
+        )
+        return {"status": "failed", "error": error}
 
     # Phase 2: PG 填充
     if with_pg:
@@ -1278,16 +1258,55 @@ def run_data_source_sync(job_id: str) -> dict[str, Any]:
             raise ValueError(f"未知数据源: {source_id}")
 
         cancelled = cancel_requested(job_id) or bool(result.get("cancelled"))
+        failure_error: str | None = None
+        if not cancelled and source_id == "quantdb":
+            from backend.shared.quantdb_sync_jobs import build_dataset_results
+
+            requested = list(job.get("datasets") or [])
+            dataset_results = build_dataset_results(requested, result)
+            result["dataset_results"] = dataset_results
+            failed = [
+                item for item in dataset_results if item.get("status") == "failed"
+            ]
+            parquet_errors = list((result.get("parquet") or {}).get("errors") or [])
+            if failed:
+                failure_error = "; ".join(
+                    f"{item['dataset']}: {item.get('error', '同步失败')}"
+                    for item in failed
+                )
+            elif parquet_errors:
+                failure_error = "; ".join(str(item) for item in parquet_errors)
+        elif not cancelled and source_id == "easy_tdx":
+            error_count = int(result.get("error_count") or 0)
+            dataset_results = list((result.get("datasets") or {}).values())
+            successful = any(
+                int(item.get("rows") or 0) > 0
+                or int(item.get("files") or 0) > 0
+                or int(item.get("partitions") or 0) > 0
+                for item in dataset_results
+            )
+            if error_count and not successful:
+                first_error = (result.get("errors") or [{}])[0].get(
+                    "error", "全部标的同步失败"
+                )
+                failure_error = f"easy_tdx 全部标的同步失败: {first_error}"
+
         status = "cancelled" if cancelled else "completed"
+        if failure_error:
+            status = "failed"
         upsert_job(
             job_id,
             status=status,
             stage=status,
             current=None,
             result=result,
+            error=failure_error,
             finished_at=_now_iso(),
         )
-        return {"status": status, "job_id": job_id, "result": result}
+        response = {"status": status, "job_id": job_id, "result": result}
+        if failure_error:
+            response["error"] = failure_error
+        return response
     except Exception as exc:  # noqa: BLE001
         logger.exception("[DataSourceSync] %s 同步失败: %s", source_id, exc)
         upsert_job(

@@ -338,6 +338,18 @@ async def check_source_updates(
     payload: SourceUpdateCheckRequest,
     current_user: dict = Depends(require_admin),
 ):
+    from backend.services.engine.data_platform.source_catalog import (
+        get_source_descriptor,
+    )
+    from backend.shared.data_source_config import is_source_enabled
+
+    try:
+        descriptor = get_source_descriptor(source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if descriptor.configurable and not is_source_enabled("A", source_id):
+        raise HTTPException(status_code=409, detail=f"{source_id} 数据源未启用")
+
     try:
         if source_id == "easy_tdx":
             import asyncio
@@ -362,7 +374,7 @@ async def check_source_updates(
             )
             response.setdefault("data", {})["source_id"] = "quantdb"
             return response
-        raise HTTPException(status_code=404, detail=f"未知数据源: {source_id}")
+        raise HTTPException(status_code=400, detail=f"{source_id} 不支持更新检查")
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -387,6 +399,15 @@ async def create_data_source_sync_job(
         raise HTTPException(
             status_code=400,
             detail=f"{payload.source_id} 不支持市场 {payload.market}",
+        )
+    from backend.shared.data_source_config import is_source_enabled
+
+    if descriptor.configurable and not is_source_enabled(
+        payload.market.upper(), payload.source_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{payload.source_id} 数据源未启用",
         )
     if payload.datasets:
         if payload.source_id == "easy_tdx":

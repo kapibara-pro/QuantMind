@@ -22,6 +22,15 @@ from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
+_MINUTE_BARS_PER_DAY = {
+    "1min": 240,
+    "5min": 48,
+    "15min": 16,
+    "30min": 8,
+    "60min": 4,
+}
+_MAX_MINUTE_BARS = 700_000
+
 
 def _split_symbol(symbol: str) -> tuple[int, str, str]:
     prefix = StockCodeUtil.to_prefix(symbol)
@@ -57,6 +66,16 @@ def _standardize_bars(raw: pd.DataFrame, symbol: str, source: str) -> pd.DataFra
     ]
     result = df[[column for column in columns if column in df.columns]]
     return result.sort_values("datetime" if "datetime" in result.columns else "trade_date")
+
+
+def _minute_request_count(start: date, end: date, freq: str) -> int:
+    """Estimate enough bars to cover the requested dates from the latest quote."""
+    bars_per_day = _MINUTE_BARS_PER_DAY.get(freq)
+    if bars_per_day is None:
+        raise InvalidFieldRequest(f"easy_tdx 不支持分钟周期: {freq}")
+    calendar_days = max((date.today() - start).days, (end - start).days, 0)
+    trading_days = math.ceil(calendar_days * 5 / 7) + 3
+    return min(max(trading_days * bars_per_day, bars_per_day * 5), _MAX_MINUTE_BARS)
 
 
 class EasyTdxAdapter(OfflineDataSourceAdapter):
@@ -140,15 +159,18 @@ class EasyTdxAdapter(OfflineDataSourceAdapter):
             }
             if freq not in periods:
                 raise InvalidFieldRequest(f"easy_tdx 不支持分钟周期: {freq}")
+            count = _minute_request_count(start, end, freq)
             raw = self._manager.execute(
                 "mac",
                 lambda client: client.get_stock_kline(
                     market,
                     code,
                     period=periods[freq],
-                    count=800,
+                    start=0,
+                    count=count,
                     adjust=Adjust.NONE,
-                    bar_time="end",
+                    # TDX 分钟时间已经是收盘标签（09:31/09:35 ... 15:00）。
+                    bar_time="start",
                 ),
             )
         except InvalidFieldRequest:

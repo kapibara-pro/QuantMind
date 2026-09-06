@@ -18,12 +18,18 @@ const JOB_POLL_INTERVAL_MS = 3000;
 
 interface QuantDBPreviewDrawerProps {
     dataset: QuantDBDataset | null;
+    remoteEnabled: boolean;
     onClose: () => void;
     /** 该数据集同步完成后刷新目录统计（可选） */
     onSynced?: () => void;
 }
 
-export function QuantDBPreviewDrawer({ dataset, onClose, onSynced }: QuantDBPreviewDrawerProps) {
+export function QuantDBPreviewDrawer({
+    dataset,
+    remoteEnabled,
+    onClose,
+    onSynced,
+}: QuantDBPreviewDrawerProps) {
     const [preview, setPreview] = useState<QuantDBPreview | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -70,6 +76,10 @@ export function QuantDBPreviewDrawer({ dataset, onClose, onSynced }: QuantDBPrev
     }, [dataset]);
 
     const fetchRemote = async () => {
+        if (!remoteEnabled) {
+            message.warning('QuantDB 数据源未启用或 SDK 未连接');
+            return;
+        }
         await load({ remote: true });
         message.info('已通过 SDK 远端预览（不消耗下载流量）');
     };
@@ -126,6 +136,10 @@ export function QuantDBPreviewDrawer({ dataset, onClose, onSynced }: QuantDBPrev
 
     const handleSync = async () => {
         if (!dataset) return;
+        if (!remoteEnabled) {
+            message.warning('QuantDB 数据源未启用，请在上方选择 easy_tdx 同步行情');
+            return;
+        }
         setStartingSync(true);
         try {
             const resp = await dataPlatformService.syncQuantDBDatasets({
@@ -196,16 +210,23 @@ export function QuantDBPreviewDrawer({ dataset, onClose, onSynced }: QuantDBPrev
                     <Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>
                         刷新
                     </Button>
-                    <Button icon={<CloudDownloadOutlined />} onClick={fetchRemote} loading={loading}>
+                    <Button
+                        icon={<CloudDownloadOutlined />}
+                        onClick={fetchRemote}
+                        loading={loading}
+                        disabled={!remoteEnabled}
+                    >
                         远端预览
                     </Button>
-                    <Tooltip title="比对远端 manifest：本地缺失或与远端不一致的数据自动从远端增量拉取">
+                    <Tooltip title={remoteEnabled
+                        ? '比对远端 manifest：本地缺失或与远端不一致的数据自动从远端增量拉取'
+                        : 'QuantDB 未启用；请在上方选择 easy_tdx 同步行情'}>
                         <Button
                             type="primary"
                             icon={<CloudSyncOutlined />}
                             onClick={handleSync}
                             loading={startingSync}
-                            disabled={isSyncingThis}
+                            disabled={!remoteEnabled || isSyncingThis}
                         >
                             {isSyncingThis ? '同步中...' : '增量同步'}
                         </Button>

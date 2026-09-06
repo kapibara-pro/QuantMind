@@ -123,7 +123,9 @@ export const AShareDataSourcePanel: React.FC = () => {
                 configured.map((item) => [item.source, item.enabled]),
             ));
             const quantdbEnabled = configured.find((item) => item.source === 'quantdb')?.enabled ?? true;
-            const easyTdxAvailable = selectable.some(
+            const easyTdxAvailable = configured.some(
+                (item) => item.source === 'easy_tdx' && item.enabled,
+            ) && selectable.some(
                 (item) => item.source_id === 'easy_tdx' && item.registered,
             );
             const nextSource: 'quantdb' | 'easy_tdx' =
@@ -156,7 +158,14 @@ export const AShareDataSourcePanel: React.FC = () => {
                     window.clearInterval(timer);
                     setSyncing(false);
                     if (response.job.status === 'completed') {
-                        message.success(`${response.job.source_id} 同步完成`);
+                        const errorCount = Number(response.job.result?.error_count || 0);
+                        if (errorCount > 0) {
+                            message.warning(
+                                `${response.job.source_id} 同步完成，${errorCount} 个标的失败`,
+                            );
+                        } else {
+                            message.success(`${response.job.source_id} 同步完成`);
+                        }
                         loadDatasets(sourceId);
                     } else if (response.job.status === 'failed') {
                         message.error(`同步失败: ${response.job.error || '请查看后端日志'}`);
@@ -168,6 +177,9 @@ export const AShareDataSourcePanel: React.FC = () => {
         }, JOB_POLL_INTERVAL_MS);
         return () => window.clearInterval(timer);
     }, [activeJob?.job_id, activeJob?.status, loadDatasets, sourceId]);
+
+    const sourceIsDisabled = sourceEnabled[sourceId] === false;
+    const sourceDisabledMessage = `${sourceId} 数据源未启用，请先在上方启用该数据源`;
 
     const handleSourceChange = async (value: 'quantdb' | 'easy_tdx') => {
         setSourceId(value);
@@ -182,8 +194,8 @@ export const AShareDataSourcePanel: React.FC = () => {
     };
 
     const checkUpdates = async () => {
-        if (sourceId === 'quantdb' && sourceEnabled.quantdb === false) {
-            message.warning('QuantDB 数据源未启用，请选择 easy_tdx 或先启用 QuantDB');
+        if (sourceIsDisabled) {
+            message.warning(sourceDisabledMessage);
             return;
         }
         setChecking(true);
@@ -202,8 +214,8 @@ export const AShareDataSourcePanel: React.FC = () => {
     };
 
     const startSync = async () => {
-        if (sourceId === 'quantdb' && sourceEnabled.quantdb === false) {
-            message.warning('QuantDB 数据源未启用，请选择 easy_tdx 或先启用 QuantDB');
+        if (sourceIsDisabled) {
+            message.warning(sourceDisabledMessage);
             return;
         }
         if (!selectedDatasets.length) {
@@ -331,7 +343,7 @@ export const AShareDataSourcePanel: React.FC = () => {
                             label: item.label,
                             value: item.source_id,
                             disabled: (item.source_id === 'easy_tdx' && !item.registered)
-                                || (item.source_id === 'quantdb' && sourceEnabled.quantdb === false),
+                                || sourceEnabled[item.source_id] === false,
                         }))}
                     />
                     <Tag color={sourceId === 'easy_tdx' ? 'orange' : 'blue'}>
@@ -351,7 +363,7 @@ export const AShareDataSourcePanel: React.FC = () => {
                     <Button
                         icon={<CloudDownloadOutlined />}
                         loading={checking}
-                        disabled={syncing || !selectedDatasets.length}
+                        disabled={sourceIsDisabled || syncing || !selectedDatasets.length}
                         onClick={checkUpdates}
                     >
                         检查更新
@@ -360,7 +372,7 @@ export const AShareDataSourcePanel: React.FC = () => {
                         type="primary"
                         icon={<CloudSyncOutlined />}
                         loading={syncing}
-                        disabled={checking || !selectedDatasets.length}
+                        disabled={sourceIsDisabled || checking || !selectedDatasets.length}
                         onClick={startSync}
                     >
                         同步数据

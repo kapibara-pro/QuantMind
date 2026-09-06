@@ -283,6 +283,7 @@ export const AdminQuantDBPanel: React.FC = () => {
             {/* 数据集抽屉预览；抽屉内增量同步完成后刷新目录统计 */}
             <QuantDBPreviewDrawer
                 dataset={previewDataset}
+                remoteEnabled={Boolean(info?.connected) && quantdbEnabled}
                 onClose={() => setPreviewDataset(null)}
                 onSynced={bumpCatalogRefresh}
             />
