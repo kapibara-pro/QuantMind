@@ -410,6 +410,7 @@ class AdminService {
         datasets: string[];
         source_id?: 'quantdb' | 'easy_tdx';
         publish_mode?: 'shadow' | 'official';
+        with_pg?: boolean;
         with_qlib?: boolean;
     }): Promise<any> {
         const resp = await this.axiosInstance.post(`/admin/data-platform/sync-schedule/${market}`, cfg);
@@ -423,6 +424,7 @@ class AdminService {
         datasets: string[];
         source_id?: 'quantdb' | 'easy_tdx';
         publish_mode?: 'shadow' | 'official';
+        with_pg?: boolean;
         with_qlib?: boolean;
     }): Promise<any> {
         const resp = await this.axiosInstance.post(

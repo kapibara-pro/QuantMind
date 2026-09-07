@@ -18,7 +18,7 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -269,11 +269,12 @@ class SourceUpdateCheckRequest(BaseModel):
 
 class DataSourceSyncRequest(BaseModel):
     source_id: str
+    operation: Literal["sync", "publish"] = "sync"
     market: str = "A"
     datasets: list[str] = Field(default_factory=list)
     days: int = Field(5, ge=1, le=3650)
     symbols: list[str] = Field(default_factory=list)
-    publish_mode: str = "shadow"
+    publish_mode: Literal["shadow", "official"] = "shadow"
     with_pg: bool = False
     with_qlib: bool = False
 
@@ -299,9 +300,13 @@ async def source_datasets(
             from backend.services.engine.data_platform.easy_tdx_sync import (
                 list_datasets,
             )
+            from backend.services.engine.data_platform.easy_tdx_publish import (
+                publication_status,
+            )
 
             datasets = list_datasets()
             data_root = os.getenv("QM_EASY_TDX_DATA_DIR", "/data/easy_tdx")
+            publication = publication_status()
         elif source_id == "quantdb":
             from backend.services.api.routers.admin.quantdb_console import DATASETS
 
@@ -315,6 +320,7 @@ async def source_datasets(
                 for item in DATASETS
             ]
             data_root = os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb")
+            publication = None
         else:
             raise HTTPException(status_code=404, detail=f"未知数据源: {source_id}")
         return {
@@ -323,6 +329,7 @@ async def source_datasets(
                 "source_id": source_id,
                 "data_dir": data_root,
                 "datasets": datasets,
+                "publication": publication,
                 "timestamp": _now_iso(),
             },
         }
@@ -409,6 +416,8 @@ async def create_data_source_sync_job(
             status_code=409,
             detail=f"{payload.source_id} 数据源未启用",
         )
+    if payload.operation == "publish" and payload.source_id != "easy_tdx":
+        raise HTTPException(status_code=400, detail="仅 easy_tdx 支持独立发布操作")
     if payload.datasets:
         if payload.source_id == "easy_tdx":
             from backend.services.engine.data_platform.easy_tdx_sync import DATASETS
@@ -426,13 +435,37 @@ async def create_data_source_sync_job(
                 status_code=400,
                 detail=f"{payload.source_id} 不支持数据集: {unknown[0]}",
             )
+    effective_datasets = list(payload.datasets)
     if payload.source_id == "easy_tdx":
-        if payload.publish_mode != "shadow":
-            raise HTTPException(status_code=400, detail="easy_tdx 第一版仅支持影子落盘")
-        if payload.with_pg or payload.with_qlib:
+        from backend.services.engine.data_platform.easy_tdx_publish import (
+            PUBLISH_DATASETS,
+        )
+
+        if payload.operation == "publish":
+            effective_datasets = list(PUBLISH_DATASETS)
+            if payload.publish_mode != "official":
+                raise HTTPException(
+                    status_code=400, detail="easy_tdx 发布操作必须使用 official 模式"
+                )
+            if not payload.with_qlib:
+                raise HTTPException(
+                    status_code=400, detail="正式发布必须同时更新 Qlib 训练数据"
+                )
+        elif payload.publish_mode == "official":
+            missing = [name for name in PUBLISH_DATASETS if name not in payload.datasets]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"自动发布必须同步完整三套日线，缺少: {', '.join(missing)}",
+                )
+            if not payload.with_qlib:
+                raise HTTPException(
+                    status_code=400, detail="正式发布必须同时更新 Qlib 训练数据"
+                )
+        elif payload.with_pg or payload.with_qlib:
             raise HTTPException(
                 status_code=400,
-                detail="easy_tdx 尚未完成因子质量门禁，不能直接写 PG 或 Qlib",
+                detail="影子同步不能直接写 PG 或 Qlib，请启用正式发布",
             )
 
     from backend.services.engine.qlib_app.celery_config import celery_app
@@ -445,8 +478,9 @@ async def create_data_source_sync_job(
     try:
         job = create_job(
             source_id=payload.source_id,
+            operation=payload.operation,
             market=payload.market.upper(),
-            datasets=list(payload.datasets),
+            datasets=effective_datasets,
             days=payload.days,
             symbols=list(payload.symbols),
             publish_mode=payload.publish_mode,

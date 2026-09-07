@@ -1233,19 +1233,63 @@ def run_data_source_sync(job_id: str) -> dict[str, Any]:
         return {"status": "cancelled", "job_id": job_id}
 
     source_id = str(job.get("source_id"))
+    operation = str(job.get("operation") or "sync")
     upsert_job(job_id, status="running", stage="starting", current="初始化数据源")
     try:
         if source_id == "easy_tdx":
-            from backend.services.engine.data_platform.easy_tdx_sync import sync
+            callback = progress_callback(job_id)
+            if operation == "publish":
+                from backend.services.engine.data_platform.easy_tdx_publish import (
+                    publish,
+                )
 
-            result = sync(
-                datasets=job.get("datasets") or None,
-                days=int(job.get("days") or 5),
-                symbols=job.get("symbols") or None,
-                publish_mode=str(job.get("publish_mode") or "shadow"),
-                progress_cb=progress_callback(job_id),
-                should_cancel=lambda: cancel_requested(job_id),
-            )
+                result = publish(
+                    with_pg=bool(job.get("with_pg")),
+                    with_qlib=bool(job.get("with_qlib")),
+                    progress_cb=callback,
+                    should_cancel=lambda: cancel_requested(job_id),
+                )
+            else:
+                from backend.services.engine.data_platform.easy_tdx_sync import sync
+
+                result = sync(
+                    datasets=job.get("datasets") or None,
+                    days=int(job.get("days") or 5),
+                    symbols=job.get("symbols") or None,
+                    publish_mode="shadow",
+                    progress_cb=callback,
+                    should_cancel=lambda: cancel_requested(job_id),
+                )
+                if (
+                    str(job.get("publish_mode") or "shadow") == "official"
+                    and not cancel_requested(job_id)
+                    and not result.get("cancelled")
+                ):
+                    error_count = int(result.get("error_count") or 0)
+                    dataset_results = list((result.get("datasets") or {}).values())
+                    successful = any(
+                        int(item.get("rows") or 0) > 0
+                        or int(item.get("files") or 0) > 0
+                        or int(item.get("partitions") or 0) > 0
+                        for item in dataset_results
+                    )
+                    if error_count and not successful:
+                        first_error = (result.get("errors") or [{}])[0].get(
+                            "error", "全部标的同步失败"
+                        )
+                        raise RuntimeError(
+                            f"easy_tdx 全部标的同步失败，未执行发布: {first_error}"
+                        )
+                    from backend.services.engine.data_platform.easy_tdx_publish import (
+                        publish,
+                    )
+
+                    result["publication"] = publish(
+                        with_pg=bool(job.get("with_pg")),
+                        with_qlib=bool(job.get("with_qlib")),
+                        progress_cb=callback,
+                        should_cancel=lambda: cancel_requested(job_id),
+                    )
         elif source_id == "quantdb":
             from backend.scripts.quantdb_daily_sync import run_daily_sync
 
@@ -1257,7 +1301,15 @@ def run_data_source_sync(job_id: str) -> dict[str, Any]:
         else:
             raise ValueError(f"未知数据源: {source_id}")
 
-        cancelled = cancel_requested(job_id) or bool(result.get("cancelled"))
+        publication = (
+            result
+            if source_id == "easy_tdx" and operation == "publish"
+            else result.get("publication") or {}
+        )
+        committed = bool(publication.get("committed"))
+        cancelled = bool(result.get("cancelled")) or (
+            cancel_requested(job_id) and not committed
+        )
         failure_error: str | None = None
         if not cancelled and source_id == "quantdb":
             from backend.shared.quantdb_sync_jobs import build_dataset_results
@@ -1276,7 +1328,7 @@ def run_data_source_sync(job_id: str) -> dict[str, Any]:
                 )
             elif parquet_errors:
                 failure_error = "; ".join(str(item) for item in parquet_errors)
-        elif not cancelled and source_id == "easy_tdx":
+        elif not cancelled and source_id == "easy_tdx" and operation == "sync":
             error_count = int(result.get("error_count") or 0)
             dataset_results = list((result.get("datasets") or {}).values())
             successful = any(

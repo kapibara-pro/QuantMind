@@ -4,9 +4,11 @@ import {
     Button,
     InputNumber,
     Progress,
+    Popconfirm,
     Segmented,
     Select,
     Space,
+    Switch,
     Table,
     Tag,
     Typography,
@@ -16,6 +18,7 @@ import type { ColumnsType } from 'antd/es/table';
 import {
     CloudDownloadOutlined,
     CloudSyncOutlined,
+    DeploymentUnitOutlined,
     ReloadOutlined,
     StopOutlined,
     SwapOutlined,
@@ -31,6 +34,27 @@ import {
 const { Text } = Typography;
 const JOB_POLL_INTERVAL_MS = 2500;
 const DATA_SOURCE_SYNC_STARTED_EVENT = 'quantmind:data-sync-started';
+const REQUIRED_PUBLISH_DATASETS = [
+    'daily_unadjusted',
+    'daily_forward',
+    'daily_backward',
+];
+
+interface PublicationStatus {
+    source_latest_date?: string | null;
+    published_latest_date?: string | null;
+    publish_available: boolean;
+    last_release?: {
+        release_id?: string;
+        published_date_range?: { start: string; end: string };
+        qlib?: { status?: string; latest_date?: string };
+        pg?: { status?: string; rows?: number };
+    } | null;
+}
+
+interface AShareDataSourcePanelProps {
+    onPublished?: () => void;
+}
 
 const SOURCE_FALLBACKS: DataSyncSource[] = [
     {
@@ -67,7 +91,7 @@ const SOURCE_FALLBACKS: DataSyncSource[] = [
     },
 ];
 
-export const AShareDataSourcePanel: React.FC = () => {
+export const AShareDataSourcePanel: React.FC<AShareDataSourcePanelProps> = ({ onPublished }) => {
     const [sources, setSources] = useState<DataSyncSource[]>(SOURCE_FALLBACKS);
     const [sourceId, setSourceId] = useState<'quantdb' | 'easy_tdx'>('quantdb');
     const [sourceEnabled, setSourceEnabled] = useState<Record<string, boolean>>({});
@@ -78,6 +102,8 @@ export const AShareDataSourcePanel: React.FC = () => {
     const [syncing, setSyncing] = useState(false);
     const [diff, setDiff] = useState<any>(null);
     const [activeJob, setActiveJob] = useState<DataSourceSyncJob | null>(null);
+    const [autoPublish, setAutoPublish] = useState(false);
+    const [publication, setPublication] = useState<PublicationStatus | null>(null);
     const [channel, setChannel] = useState<'standard' | 'mac'>('mac');
     const [serverInfo, setServerInfo] = useState<{
         available: boolean;
@@ -89,6 +115,7 @@ export const AShareDataSourcePanel: React.FC = () => {
     const loadDatasets = useCallback(async (nextSource: 'quantdb' | 'easy_tdx') => {
         const response = await dataPlatformService.getSourceDatasets(nextSource);
         setDatasets(response.datasets);
+        setPublication(nextSource === 'easy_tdx' ? response.publication || null : null);
         setSelectedDatasets(
             response.datasets.filter((item) => item.default).map((item) => item.dataset),
         );
@@ -196,14 +223,32 @@ export const AShareDataSourcePanel: React.FC = () => {
                     setSyncing(false);
                     if (response.job.status === 'completed') {
                         const errorCount = Number(response.job.result?.error_count || 0);
-                        if (errorCount > 0) {
+                        const publicationResult = response.job.operation === 'publish'
+                            ? response.job.result
+                            : response.job.result?.publication;
+                        const publishWarnings = Array.isArray(publicationResult?.warnings)
+                            ? publicationResult.warnings as string[]
+                            : [];
+                        if (publishWarnings.length > 0) {
+                            message.warning(`训练行情已发布；${publishWarnings.join('；')}`);
+                        } else if (errorCount > 0) {
                             message.warning(
                                 `${response.job.source_id} 同步完成，${errorCount} 个标的失败`,
                             );
                         } else {
-                            message.success(`${response.job.source_id} 同步完成`);
+                            message.success(
+                                response.job.operation === 'publish'
+                                    ? 'easy_tdx 已发布到训练链路'
+                                    : `${response.job.source_id} 同步完成`,
+                            );
                         }
                         loadDatasets(sourceId);
+                        if (
+                            response.job.operation === 'publish'
+                            || response.job.result?.publication
+                        ) {
+                            onPublished?.();
+                        }
                     } else if (response.job.status === 'failed') {
                         message.error(`同步失败: ${response.job.error || '请查看后端日志'}`);
                     }
@@ -213,7 +258,7 @@ export const AShareDataSourcePanel: React.FC = () => {
             }
         }, JOB_POLL_INTERVAL_MS);
         return () => window.clearInterval(timer);
-    }, [activeJob?.job_id, activeJob?.status, loadDatasets, sourceId]);
+    }, [activeJob?.job_id, activeJob?.status, loadDatasets, onPublished, sourceId]);
 
     const sourceIsDisabled = sourceEnabled[sourceId] === false;
     const sourceDisabledMessage = `${sourceId} 数据源未启用，请先在上方启用该数据源`;
@@ -222,11 +267,30 @@ export const AShareDataSourcePanel: React.FC = () => {
         setSourceId(value);
         setDiff(null);
         setActiveJob(null);
+        setAutoPublish(false);
         try {
             await loadDatasets(value);
         } catch (error: unknown) {
             const detail = error instanceof Error ? error.message : '未知错误';
             message.error(`加载数据集失败: ${detail}`);
+        }
+    };
+
+    const handleDatasetsChange = (values: string[]) => {
+        setSelectedDatasets(
+            autoPublish
+                ? Array.from(new Set([...values, ...REQUIRED_PUBLISH_DATASETS]))
+                : values,
+        );
+    };
+
+    const handleAutoPublishChange = (checked: boolean) => {
+        setAutoPublish(checked);
+        if (checked) {
+            setSelectedDatasets(Array.from(new Set([
+                ...selectedDatasets,
+                ...REQUIRED_PUBLISH_DATASETS,
+            ])));
         }
     };
 
@@ -266,7 +330,9 @@ export const AShareDataSourcePanel: React.FC = () => {
                 market: 'A',
                 datasets: selectedDatasets,
                 days,
-                publish_mode: sourceId === 'easy_tdx' ? 'shadow' : 'official',
+                publish_mode: sourceId === 'easy_tdx' && !autoPublish ? 'shadow' : 'official',
+                with_pg: sourceId === 'easy_tdx' && autoPublish,
+                with_qlib: sourceId === 'easy_tdx' && autoPublish,
             });
             setActiveJob(response.job);
             message.success(`同步任务已提交: ${response.job.job_id}`);
@@ -274,6 +340,28 @@ export const AShareDataSourcePanel: React.FC = () => {
             setSyncing(false);
             const detail = error instanceof Error ? error.message : '未知错误';
             message.error(`提交同步失败: ${detail}`);
+        }
+    };
+
+    const publishExisting = async () => {
+        setSyncing(true);
+        try {
+            const response = await dataPlatformService.createDataSourceSyncJob({
+                source_id: 'easy_tdx',
+                operation: 'publish',
+                market: 'A',
+                datasets: REQUIRED_PUBLISH_DATASETS,
+                days,
+                publish_mode: 'official',
+                with_pg: true,
+                with_qlib: true,
+            });
+            setActiveJob(response.job);
+            message.success(`发布任务已提交: ${response.job.job_id}`);
+        } catch (error: unknown) {
+            setSyncing(false);
+            const detail = error instanceof Error ? error.message : '未知错误';
+            message.error(`提交发布失败: ${detail}`);
         }
     };
 
@@ -384,7 +472,7 @@ export const AShareDataSourcePanel: React.FC = () => {
                         }))}
                     />
                     <Tag color={sourceId === 'easy_tdx' ? 'orange' : 'blue'}>
-                        {sourceId === 'easy_tdx' ? '影子数据' : '正式数据'}
+                        {sourceId === 'easy_tdx' ? '采集区' : '正式数据'}
                     </Tag>
                 </Space>
                 <Space wrap>
@@ -414,13 +502,29 @@ export const AShareDataSourcePanel: React.FC = () => {
                     >
                         同步数据
                     </Button>
+                    {sourceId === 'easy_tdx' && (
+                        <Popconfirm
+                            title="发布到训练链路"
+                            description="将通过质量校验的三套日线合并到正式行情，并更新 Qlib 与 PG。"
+                            okText="发布"
+                            cancelText="取消"
+                            onConfirm={publishExisting}
+                        >
+                            <Button
+                                icon={<DeploymentUnitOutlined />}
+                                disabled={sourceIsDisabled || syncing || !publication?.source_latest_date}
+                            >
+                                发布现有行情
+                            </Button>
+                        </Popconfirm>
+                    )}
                 </Space>
             </div>
 
             <Select
                 mode="multiple"
                 value={selectedDatasets}
-                onChange={setSelectedDatasets}
+                onChange={handleDatasetsChange}
                 disabled={syncing || checking}
                 className="w-full"
                 options={datasets.map((item) => ({
@@ -433,12 +537,30 @@ export const AShareDataSourcePanel: React.FC = () => {
 
             <div className="mt-2 text-xs text-slate-500">{source?.notes}</div>
             {sourceId === 'easy_tdx' && (
-                <Alert
-                    className="mt-3"
-                    type="warning"
-                    showIcon
-                    message="easy_tdx 只提供行情，不包含 QuantDB 的财务、估值及 L1/L2 因子；本阶段不会写入 PG 或 Qlib。"
-                />
+                <>
+                    <div className="flex flex-wrap items-center gap-2 mt-3">
+                        <Tag>采集区 {publication?.source_latest_date || '暂无数据'}</Tag>
+                        <Tag color="blue">正式行情 {publication?.published_latest_date || '未发布'}</Tag>
+                        <Tag color={publication?.last_release?.qlib?.status === 'ok' ? 'green' : 'default'}>
+                            Qlib {publication?.last_release?.qlib?.latest_date || '未发布'}
+                        </Tag>
+                        <Space size="small">
+                            <Switch
+                                size="small"
+                                checked={autoPublish}
+                                onChange={handleAutoPublishChange}
+                                disabled={syncing}
+                            />
+                            <Text className="text-xs">同步后自动发布</Text>
+                        </Space>
+                    </div>
+                    <Alert
+                        className="mt-3"
+                        type="info"
+                        showIcon
+                        message="发布只更新行情、PG 行情投影和 Qlib；QuantDB 财务、估值及 L1/L2 因子保持原数据与原日期。"
+                    />
+                </>
             )}
 
             {diff?.summary && (

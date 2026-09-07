@@ -19,6 +19,11 @@ import { adminService } from '../../services/adminService';
 import { dataPlatformService } from '../../services/dataPlatformService';
 
 const DATA_SOURCE_SYNC_STARTED_EVENT = 'quantmind:data-sync-started';
+const REQUIRED_PUBLISH_DATASETS = [
+    'daily_unadjusted',
+    'daily_forward',
+    'daily_backward',
+];
 
 function describeError(error: unknown): string {
     const candidate = error as {
@@ -37,6 +42,8 @@ export interface MarketSyncSchedule {
     datasets: string[];
     source_id: 'quantdb' | 'easy_tdx';
     publish_mode: 'shadow' | 'official';
+    with_pg?: boolean;
+    with_qlib?: boolean;
 }
 
 interface SyncSchedulePanelProps {
@@ -61,6 +68,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
     const [days, setDays] = useState(defaultDays);
     const [datasets, setDatasets] = useState<string[]>([]);
     const [sourceId, setSourceId] = useState<'quantdb' | 'easy_tdx'>('quantdb');
+    const [autoPublish, setAutoPublish] = useState(false);
     const [datasetOptions, setDatasetOptions] = useState<Array<{ label: string; value: string }>>([]);
 
     useEffect(() => {
@@ -79,6 +87,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 setDays(s.days ?? defaultDays);
                 const nextSource = s.source_id === 'easy_tdx' ? 'easy_tdx' : 'quantdb';
                 setSourceId(nextSource);
+                setAutoPublish(nextSource === 'easy_tdx' && s.publish_mode === 'official');
                 await loadSourceDatasets(nextSource, s.datasets);
             }
         } catch (err: unknown) {
@@ -117,11 +126,30 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
 
     const handleSourceChange = async (value: 'quantdb' | 'easy_tdx') => {
         setSourceId(value);
+        setAutoPublish(false);
         try {
             await loadSourceDatasets(value);
         } catch (err: unknown) {
             message.error(`加载数据集失败: ${describeError(err)}`);
         }
+    };
+
+    const handleAutoPublishChange = (checked: boolean) => {
+        setAutoPublish(checked);
+        if (checked) {
+            setDatasets(Array.from(new Set([
+                ...datasets,
+                ...REQUIRED_PUBLISH_DATASETS,
+            ])));
+        }
+    };
+
+    const handleDatasetsChange = (values: string[]) => {
+        setDatasets(
+            autoPublish
+                ? Array.from(new Set([...values, ...REQUIRED_PUBLISH_DATASETS]))
+                : values,
+        );
     };
 
     const handleSave = async () => {
@@ -133,7 +161,9 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 days,
                 datasets,
                 source_id: sourceId,
-                publish_mode: sourceId === 'easy_tdx' ? 'shadow' : 'official',
+                publish_mode: sourceId === 'easy_tdx' && !autoPublish ? 'shadow' : 'official',
+                with_pg: sourceId === 'easy_tdx' && autoPublish,
+                with_qlib: sourceId === 'easy_tdx' && autoPublish,
             });
             message.success('定时同步配置已保存');
         } catch (err: unknown) {
@@ -152,7 +182,9 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 days,
                 datasets,
                 source_id: sourceId,
-                publish_mode: sourceId === 'easy_tdx' ? 'shadow' : 'official',
+                publish_mode: sourceId === 'easy_tdx' && !autoPublish ? 'shadow' : 'official',
+                with_pg: sourceId === 'easy_tdx' && autoPublish,
+                with_qlib: sourceId === 'easy_tdx' && autoPublish,
             });
             if (response?.data?.job) {
                 // AShareDataSourcePanel is the single owner of sync progress UI.
@@ -201,7 +233,20 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                                     { label: 'easy_tdx 通达信行情', value: 'easy_tdx' },
                                 ]}
                             />
-                            {sourceId === 'easy_tdx' && <Tag color="orange">影子落盘</Tag>}
+                            {sourceId === 'easy_tdx' && (
+                                <>
+                                    <Tag color={autoPublish ? 'green' : 'orange'}>
+                                        {autoPublish ? '自动发布' : '仅采集'}
+                                    </Tag>
+                                    <Switch
+                                        size="small"
+                                        checked={autoPublish}
+                                        onChange={handleAutoPublishChange}
+                                        checkedChildren="发布"
+                                        unCheckedChildren="采集"
+                                    />
+                                </>
+                            )}
                         </div>
                     )}
                     <div className="flex flex-wrap items-center gap-2">
@@ -240,7 +285,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                             size="small"
                             className="w-full mt-2"
                             value={datasets}
-                            onChange={setDatasets}
+                            onChange={handleDatasetsChange}
                             options={datasetOptions}
                             placeholder="选择定时同步的数据集"
                             maxTagCount="responsive"
@@ -253,7 +298,9 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                         message={
                             <span className="text-xs">
                                 {sourceId === 'easy_tdx'
-                                    ? 'easy_tdx 仅写入独立影子目录，不会覆盖 QuantDB 或直接更新训练因子。'
+                                    ? autoPublish
+                                        ? '同步完成并通过质量门禁后，自动更新正式行情、PG 行情投影和 Qlib。'
+                                        : 'easy_tdx 仅写入独立采集目录，不更新正式行情和训练数据。'
                                     : '同步在后台执行（Celery），到点自动触发，时区 Asia/Shanghai。'}
                             </span>
                         }

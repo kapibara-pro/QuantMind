@@ -159,6 +159,82 @@ async def test_create_sync_job_rejects_same_source_active_job(
     assert "sync-easy_tdx-active" in str(exc_info.value.detail)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload_kwargs", "expected_detail"),
+    [
+        (
+            {
+                "source_id": "quantdb",
+                "operation": "publish",
+                "publish_mode": "official",
+            },
+            "仅 easy_tdx 支持独立发布操作",
+        ),
+        (
+            {"source_id": "easy_tdx", "operation": "publish"},
+            "发布操作必须使用 official 模式",
+        ),
+        (
+            {
+                "source_id": "easy_tdx",
+                "operation": "publish",
+                "publish_mode": "official",
+                "with_qlib": False,
+            },
+            "必须同时更新 Qlib",
+        ),
+        (
+            {
+                "source_id": "easy_tdx",
+                "datasets": ["daily_unadjusted", "daily_forward"],
+                "publish_mode": "official",
+                "with_qlib": True,
+            },
+            "缺少: daily_backward",
+        ),
+    ],
+)
+async def test_sync_job_validates_publication_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    payload_kwargs: dict,
+    expected_detail: str,
+):
+    from backend.services.api.routers.admin import data_platform
+    from backend.services.engine.data_platform import source_catalog
+    from backend.shared import data_source_config
+
+    monkeypatch.setattr(
+        source_catalog,
+        "get_source_descriptor",
+        lambda _source_id: SimpleNamespace(markets=["A"], configurable=True),
+    )
+    monkeypatch.setattr(data_source_config, "is_source_enabled", lambda *_: True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await data_platform.create_data_source_sync_job(
+            data_platform.DataSourceSyncRequest(market="A", **payload_kwargs),
+            {"username": "admin"},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert expected_detail in str(exc_info.value.detail)
+
+
+def test_schedule_rejects_projection_without_publication():
+    from backend.services.api.routers.admin import sync_schedule
+
+    payload = sync_schedule.SyncScheduleRequest(
+        enabled=True,
+        source_id="easy_tdx",
+        publish_mode="shadow",
+        with_qlib=True,
+    )
+
+    with pytest.raises(HTTPException, match="仅采集模式不能更新"):
+        sync_schedule._validate_schedule_payload("A", payload)
+
+
 class _JobRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}

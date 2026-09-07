@@ -70,12 +70,15 @@ export interface DataSourceDataset {
 export interface DataSourceSyncJob {
     job_id: string;
     source_id: string;
+    operation?: 'sync' | 'publish';
     market: string;
     status: 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
     stage: string;
     datasets: string[];
     days: number;
     publish_mode: 'shadow' | 'official';
+    with_pg?: boolean;
+    with_qlib?: boolean;
     done: number;
     total?: number | null;
     current?: string | null;
@@ -445,6 +448,18 @@ class DataPlatformService {
         source_id: string;
         data_dir: string;
         datasets: DataSourceDataset[];
+        publication?: {
+            source_latest_date?: string | null;
+            published_latest_date?: string | null;
+            publish_available: boolean;
+            last_release?: {
+                release_id?: string;
+                finished_at?: string;
+                published_date_range?: { start: string; end: string };
+                qlib?: { status?: string; latest_date?: string };
+                pg?: { status?: string; rows?: number };
+            } | null;
+        } | null;
         timestamp: string;
     }> {
         const resp = await this.axiosInstance.get(
@@ -464,6 +479,7 @@ class DataPlatformService {
 
     async createDataSourceSyncJob(payload: {
         source_id: string;
+        operation?: 'sync' | 'publish';
         market: string;
         datasets: string[];
         days: number;

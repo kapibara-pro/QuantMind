@@ -27,7 +27,8 @@ class SyncScheduleRequest(BaseModel):
     days: int = Field(5, ge=1, le=365, description="同步最近 N 个交易日（BC 为自然日）")
     datasets: list[str] = Field(default_factory=list, description="要同步的数据集；空=按默认全量")
     source_id: str = Field("quantdb", description="数据源标识；A 股可选 quantdb/easy_tdx")
-    publish_mode: str = Field("shadow", description="落盘发布模式；easy_tdx 当前仅支持 shadow")
+    publish_mode: str = Field("shadow", description="落盘发布模式")
+    with_pg: bool = Field(False, description="同步后更新 PostgreSQL 行情投影")
     with_qlib: bool = Field(False, description="同步后重建 Qlib 缓存")
 
     @field_validator("time")
@@ -73,10 +74,6 @@ def _scheduler():
 def _validate_schedule_payload(market: str, payload: SyncScheduleRequest) -> None:
     if market != "A" and payload.source_id != "quantdb":
         raise HTTPException(status_code=400, detail="easy_tdx 仅支持 A 股市场")
-    if payload.source_id == "easy_tdx" and payload.publish_mode != "shadow":
-        raise HTTPException(status_code=400, detail="easy_tdx 第一版仅支持影子落盘")
-    if payload.source_id == "easy_tdx" and payload.with_qlib:
-        raise HTTPException(status_code=400, detail="easy_tdx 尚不能直接重建 Qlib")
     if payload.source_id == "easy_tdx" and payload.datasets:
         from backend.services.engine.data_platform.easy_tdx_sync import DATASETS
 
@@ -86,6 +83,26 @@ def _validate_schedule_payload(market: str, payload: SyncScheduleRequest) -> Non
                 status_code=400,
                 detail=f"easy_tdx 不支持数据集: {unknown[0]}",
             )
+    if payload.source_id == "easy_tdx" and payload.publish_mode == "official":
+        from backend.services.engine.data_platform.easy_tdx_publish import (
+            PUBLISH_DATASETS,
+        )
+
+        missing = [name for name in PUBLISH_DATASETS if name not in payload.datasets]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"自动发布必须同步完整三套日线，缺少: {', '.join(missing)}",
+            )
+        if not payload.with_qlib:
+            raise HTTPException(
+                status_code=400, detail="正式发布必须同时更新 Qlib 训练数据"
+            )
+    elif payload.source_id == "easy_tdx" and (payload.with_pg or payload.with_qlib):
+        raise HTTPException(
+            status_code=400,
+            detail="仅采集模式不能更新 PG 或 Qlib，请启用自动发布",
+        )
 
 
 @router.get("/sync-schedule")
@@ -131,6 +148,7 @@ async def save_market_schedule(
             "datasets": payload.datasets,
             "source_id": payload.source_id,
             "publish_mode": payload.publish_mode,
+            "with_pg": payload.with_pg,
             "with_qlib": payload.with_qlib,
         },
     )
@@ -170,7 +188,7 @@ async def run_market_schedule_now(
                 datasets=list(schedule.datasets),
                 days=schedule.days,
                 publish_mode=schedule.publish_mode,
-                with_pg=False,
+                with_pg=schedule.with_pg,
                 with_qlib=schedule.with_qlib,
             ),
             current_user,

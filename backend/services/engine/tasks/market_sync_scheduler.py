@@ -35,6 +35,7 @@ DEFAULT_SCHEDULE = {
     "datasets": [],
     "source_id": "quantdb",
     "publish_mode": "shadow",
+    "with_pg": False,
     "with_qlib": False,
 }
 
@@ -120,6 +121,7 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     datasets = cfg.get("datasets") or []
     source_id = str(cfg.get("source_id") or "quantdb")
     publish_mode = str(cfg.get("publish_mode") or "shadow")
+    with_pg = bool(cfg.get("with_pg"))
     with_qlib = bool(cfg.get("with_qlib"))
 
     result: dict[str, Any] = {
@@ -130,15 +132,49 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
 
     if market == "A":
         if source_id == "easy_tdx":
-            if with_qlib:
-                raise ValueError("easy_tdx 影子数据尚不能直接重建 Qlib")
             from backend.services.engine.data_platform.easy_tdx_sync import sync
+
+            publish = None
+            if publish_mode == "official":
+                from backend.services.engine.data_platform.easy_tdx_publish import (
+                    PUBLISH_DATASETS,
+                    publish,
+                )
+
+                missing = [name for name in PUBLISH_DATASETS if name not in datasets]
+                if missing:
+                    raise ValueError(
+                        "easy_tdx 自动发布必须同步完整三套日线，缺少: "
+                        + ", ".join(missing)
+                    )
+                if not with_qlib:
+                    raise ValueError("easy_tdx 正式发布必须同时更新 Qlib 训练数据")
 
             result["result"] = sync(
                 datasets=datasets or None,
                 days=days,
-                publish_mode=publish_mode,
+                publish_mode="shadow",
             )
+            if publish_mode == "official":
+                sync_result = result["result"]
+                error_count = int(sync_result.get("error_count") or 0)
+                successful = any(
+                    int(item.get("rows") or 0) > 0
+                    or int(item.get("files") or 0) > 0
+                    or int(item.get("partitions") or 0) > 0
+                    for item in (sync_result.get("datasets") or {}).values()
+                )
+                if error_count and not successful:
+                    first_error = (sync_result.get("errors") or [{}])[0].get(
+                        "error", "全部标的同步失败"
+                    )
+                    raise RuntimeError(
+                        f"easy_tdx 全部标的同步失败，未执行发布: {first_error}"
+                    )
+                result["publication"] = publish(
+                    with_pg=with_pg,
+                    with_qlib=with_qlib,
+                )
             result["finished"] = datetime.now().isoformat()
             return result
         if source_id != "quantdb":

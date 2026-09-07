@@ -77,7 +77,7 @@ SOURCE_CATALOG: dict[str, SourceDescriptor] = {
             "stock_list",
         ),
         managed_service=True,
-        notes="行情影子数据源；不提供财务、估值及 L1/L2 因子",
+        notes="A 股行情采集源；通过质量门禁后可发布到正式行情与 Qlib，不提供财务、估值及 L1/L2 因子",
     ),
 }
 

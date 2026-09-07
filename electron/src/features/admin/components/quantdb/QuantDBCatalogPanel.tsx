@@ -329,7 +329,7 @@ export function QuantDBCatalogPanel({ connected, enabled, onPreview, refreshSign
     return (
         <Card
             size="small"
-            title={<Space><DatabaseOutlined />数据集目录与分板块同步</Space>}
+            title={<Space><DatabaseOutlined />QuantDB 正式数据目录与分板块同步</Space>}
             extra={
                 <Space>
                     <Text type="secondary" className="text-xs">

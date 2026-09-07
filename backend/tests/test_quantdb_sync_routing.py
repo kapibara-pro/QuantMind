@@ -145,6 +145,81 @@ def test_generic_task_marks_total_easy_tdx_failure(monkeypatch):
     assert "节点无响应" in updates[-1]["error"]
 
 
+def test_generic_task_routes_easy_tdx_publish_job(monkeypatch):
+    from backend.services.engine.data_platform import easy_tdx_publish
+    from backend.services.engine.tasks import celery_tasks
+    from backend.shared import data_sync_jobs
+
+    job = {
+        "job_id": "publish-test",
+        "operation": "publish",
+        "source_id": "easy_tdx",
+        "datasets": list(easy_tdx_publish.PUBLISH_DATASETS),
+        "with_pg": True,
+        "with_qlib": True,
+    }
+    calls: list[dict] = []
+    updates: list[dict] = []
+    monkeypatch.setattr(data_sync_jobs, "get_job", lambda *_: job)
+    monkeypatch.setattr(data_sync_jobs, "cancel_requested", lambda *_: False)
+    monkeypatch.setattr(data_sync_jobs, "progress_callback", lambda *_: None)
+    monkeypatch.setattr(
+        data_sync_jobs,
+        "upsert_job",
+        lambda _job_id, **fields: updates.append(fields),
+    )
+    monkeypatch.setattr(
+        easy_tdx_publish,
+        "publish",
+        lambda **kwargs: calls.append(kwargs)
+        or {"release_id": "release-test", "committed": True},
+    )
+
+    response = celery_tasks.run_data_source_sync.run("publish-test")
+
+    assert response["status"] == "completed"
+    assert calls[0]["with_pg"] is True
+    assert calls[0]["with_qlib"] is True
+    assert updates[-1]["status"] == "completed"
+
+
+def test_generic_task_does_not_mark_committed_publish_as_cancelled(monkeypatch):
+    from backend.services.engine.data_platform import easy_tdx_publish
+    from backend.services.engine.tasks import celery_tasks
+    from backend.shared import data_sync_jobs
+
+    job = {
+        "job_id": "publish-late-cancel",
+        "operation": "publish",
+        "source_id": "easy_tdx",
+        "datasets": list(easy_tdx_publish.PUBLISH_DATASETS),
+        "with_pg": False,
+        "with_qlib": True,
+    }
+    cancel_states = iter([False, True])
+    updates: list[dict] = []
+    monkeypatch.setattr(data_sync_jobs, "get_job", lambda *_: job)
+    monkeypatch.setattr(
+        data_sync_jobs, "cancel_requested", lambda *_: next(cancel_states)
+    )
+    monkeypatch.setattr(data_sync_jobs, "progress_callback", lambda *_: None)
+    monkeypatch.setattr(
+        data_sync_jobs,
+        "upsert_job",
+        lambda _job_id, **fields: updates.append(fields),
+    )
+    monkeypatch.setattr(
+        easy_tdx_publish,
+        "publish",
+        lambda **_kwargs: {"release_id": "release-test", "committed": True},
+    )
+
+    response = celery_tasks.run_data_source_sync.run("publish-late-cancel")
+
+    assert response["status"] == "completed"
+    assert updates[-1]["status"] == "completed"
+
+
 @pytest.mark.asyncio
 async def test_quantdb_sync_endpoint_rejects_disabled_source(monkeypatch):
     from backend.services.api.routers.admin import quantdb_console

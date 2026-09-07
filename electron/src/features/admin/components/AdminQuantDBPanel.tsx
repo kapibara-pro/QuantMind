@@ -267,7 +267,7 @@ export const AdminQuantDBPanel: React.FC = () => {
                 </Button>
             </div>
 
-            <AShareDataSourcePanel />
+            <AShareDataSourcePanel onPublished={bumpCatalogRefresh} />
 
             {/* 定时同步调度面板（建议次日 00:00 以后按需错峰，具体时间以前端设置为准） */}
             <SyncSchedulePanel market="A" defaultDays={5} />

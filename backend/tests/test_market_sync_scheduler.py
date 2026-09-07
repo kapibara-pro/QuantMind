@@ -166,3 +166,63 @@ def test_run_ashare_easy_tdx_schedule_uses_shadow_sync(monkeypatch):
             "publish_mode": "shadow",
         }
     ]
+
+
+def test_run_ashare_easy_tdx_schedule_can_publish_after_sync(monkeypatch):
+    from backend.services.engine.data_platform import easy_tdx_publish, easy_tdx_sync
+    from backend.services.engine.tasks.market_sync_scheduler import run_market_sync
+
+    monkeypatch.setattr(
+        easy_tdx_sync,
+        "sync",
+        lambda **_: {"source_id": "easy_tdx", "rows": 10},
+    )
+    publish_calls: list[dict] = []
+    monkeypatch.setattr(
+        easy_tdx_publish,
+        "publish",
+        lambda **kwargs: publish_calls.append(kwargs)
+        or {"release_id": "release-test"},
+    )
+
+    result = run_market_sync(
+        "A",
+        {
+            "source_id": "easy_tdx",
+            "publish_mode": "official",
+            "days": 3,
+            "datasets": list(easy_tdx_publish.PUBLISH_DATASETS),
+            "with_pg": True,
+            "with_qlib": True,
+        },
+    )
+
+    assert result["publication"]["release_id"] == "release-test"
+    assert publish_calls == [{"with_pg": True, "with_qlib": True}]
+
+
+def test_run_ashare_easy_tdx_schedule_rejects_incomplete_publish_bundle(
+    monkeypatch,
+):
+    from backend.services.engine.data_platform import easy_tdx_sync
+    from backend.services.engine.tasks.market_sync_scheduler import run_market_sync
+
+    sync_calls: list[dict] = []
+    monkeypatch.setattr(
+        easy_tdx_sync,
+        "sync",
+        lambda **kwargs: sync_calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="daily_backward"):
+        run_market_sync(
+            "A",
+            {
+                "source_id": "easy_tdx",
+                "publish_mode": "official",
+                "datasets": ["daily_unadjusted", "daily_forward"],
+                "with_qlib": True,
+            },
+        )
+
+    assert sync_calls == []

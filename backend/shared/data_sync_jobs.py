@@ -117,6 +117,7 @@ def create_job(
     with_pg: bool,
     with_qlib: bool,
     started_by: str,
+    operation: str = "sync",
 ) -> dict[str, Any]:
     active_job = find_active_job(market, source_id)
     if active_job is not None:
@@ -143,6 +144,7 @@ def create_job(
     job = {
         "job_id": job_id,
         "source_id": source_id,
+        "operation": operation,
         "market": market,
         "status": "queued",
         "stage": "queued",
@@ -242,6 +244,57 @@ def progress_callback(job_id: str):
                 job_id,
                 stage="write",
                 current=f"写入 {data.get('dataset')} 影子分区",
+            )
+        elif event == "publish_validating":
+            upsert_job(
+                job_id,
+                status="running",
+                stage="quality_gate",
+                done=0,
+                current="校验三套日线发布包",
+            )
+        elif event == "publish_start":
+            upsert_job(
+                job_id,
+                status="running",
+                stage="publish_prepare",
+                done=0,
+                total=data.get("total"),
+                current="质量校验通过，准备正式分区",
+            )
+        elif event == "publish_partition":
+            upsert_job(
+                job_id,
+                stage="publish",
+                done=data.get("done", 0),
+                total=data.get("total"),
+                current=f"发布 {data.get('dataset')} / {data.get('date')}",
+            )
+        elif event == "publish_qlib":
+            progress = data.get("progress")
+            suffix = f"（{progress}%）" if progress is not None else ""
+            upsert_job(
+                job_id,
+                stage="qlib",
+                done=data.get("done", 0),
+                total=data.get("total"),
+                current=f"重建并切换 Qlib 训练数据{suffix}",
+            )
+        elif event == "publish_pg":
+            upsert_job(
+                job_id,
+                stage="pg",
+                done=data.get("done", 0),
+                total=data.get("total"),
+                current="更新 PostgreSQL 行情投影",
+            )
+        elif event == "publish_complete":
+            upsert_job(
+                job_id,
+                stage="finalizing",
+                done=data.get("done", 0),
+                total=data.get("total"),
+                current="写入发布清单",
             )
 
     return _callback
