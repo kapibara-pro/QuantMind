@@ -1,9 +1,40 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, InputNumber, message, Select, Space, Switch, Tag, TimePicker } from 'antd';
+import {
+    Alert,
+    Button,
+    InputNumber,
+    message,
+    Progress,
+    Select,
+    Space,
+    Switch,
+    Tag,
+    TimePicker,
+    Typography,
+} from 'antd';
 import dayjs, { Dayjs } from 'dayjs';
-import { ClockCircleOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import {
+    ClockCircleOutlined,
+    StopOutlined,
+    ThunderboltOutlined,
+} from '@ant-design/icons';
 import { adminService } from '../../services/adminService';
-import { dataPlatformService } from '../../services/dataPlatformService';
+import {
+    dataPlatformService,
+    DataSourceSyncJob,
+} from '../../services/dataPlatformService';
+
+const { Text } = Typography;
+const JOB_POLL_INTERVAL_MS = 2500;
+const ACTIVE_JOB_STATUSES = ['queued', 'running', 'cancelling'];
+
+function describeError(error: unknown): string {
+    const candidate = error as {
+        message?: string;
+        response?: { data?: { detail?: string } };
+    };
+    return candidate.response?.data?.detail || candidate.message || '未知错误';
+}
 
 export interface MarketSyncSchedule {
     market: string;
@@ -39,11 +70,69 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
     const [datasets, setDatasets] = useState<string[]>([]);
     const [sourceId, setSourceId] = useState<'quantdb' | 'easy_tdx'>('quantdb');
     const [datasetOptions, setDatasetOptions] = useState<Array<{ label: string; value: string }>>([]);
+    const [activeJob, setActiveJob] = useState<DataSourceSyncJob | null>(null);
+    const [cancelling, setCancelling] = useState(false);
 
     useEffect(() => {
         loadSchedule();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [market]);
+
+    useEffect(() => {
+        if (market !== 'A') {
+            setActiveJob(null);
+            return;
+        }
+        let cancelled = false;
+        const recoverActiveJob = async () => {
+            try {
+                const response = await dataPlatformService.listDataSourceSyncJobs();
+                const job = response.jobs.find(
+                    (item) => item.market === market
+                        && item.source_id === sourceId
+                        && ACTIVE_JOB_STATUSES.includes(item.status),
+                );
+                if (!cancelled) setActiveJob(job ?? null);
+            } catch (error) {
+                console.error('[SyncSchedulePanel] recover active job failed', error);
+            }
+        };
+        recoverActiveJob();
+        return () => { cancelled = true; };
+    }, [market, sourceId]);
+
+    const activeJobId = activeJob?.job_id;
+    const activeJobStatus = activeJob?.status;
+
+    useEffect(() => {
+        if (!activeJobId || !activeJobStatus || !ACTIVE_JOB_STATUSES.includes(activeJobStatus)) {
+            return;
+        }
+        const timer = window.setInterval(async () => {
+            try {
+                const response = await dataPlatformService.getDataSourceSyncJob(activeJobId);
+                setActiveJob(response.job);
+                if (!ACTIVE_JOB_STATUSES.includes(response.job.status)) {
+                    window.clearInterval(timer);
+                    if (response.job.status === 'completed') {
+                        const errorCount = Number(response.job.result?.error_count || 0);
+                        if (errorCount > 0) {
+                            message.warning(`同步完成，${errorCount} 个标的失败`);
+                        } else {
+                            message.success('同步完成');
+                        }
+                    } else if (response.job.status === 'cancelled') {
+                        message.warning('同步已取消');
+                    } else {
+                        message.error(`同步失败: ${response.job.error || '请查看后端日志'}`);
+                    }
+                }
+            } catch (error) {
+                console.error('[SyncSchedulePanel] poll job failed', error);
+            }
+        }, JOB_POLL_INTERVAL_MS);
+        return () => window.clearInterval(timer);
+    }, [activeJobId, activeJobStatus]);
 
     const loadSchedule = async () => {
         setLoading(true);
@@ -59,8 +148,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 await loadSourceDatasets(nextSource, s.datasets);
             }
         } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : '未知错误';
-            message.error(`加载定时配置失败: ${msg}`);
+            message.error(`加载定时配置失败: ${describeError(err)}`);
         } finally {
             setLoading(false);
         }
@@ -95,11 +183,11 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
 
     const handleSourceChange = async (value: 'quantdb' | 'easy_tdx') => {
         setSourceId(value);
+        setActiveJob(null);
         try {
             await loadSourceDatasets(value);
         } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : '未知错误';
-            message.error(`加载数据集失败: ${msg}`);
+            message.error(`加载数据集失败: ${describeError(err)}`);
         }
     };
 
@@ -116,8 +204,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
             });
             message.success('定时同步配置已保存');
         } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : '未知错误';
-            message.error(`保存定时配置失败: ${msg}`);
+            message.error(`保存定时配置失败: ${describeError(err)}`);
         } finally {
             setSaving(false);
         }
@@ -126,15 +213,47 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
     const handleRunNow = async () => {
         setRunning(true);
         try {
-            await adminService.runSyncScheduleNow(market);
-            message.success('已派发同步任务（后台执行）');
+            const response = await adminService.runSyncScheduleNow(market, {
+                enabled,
+                time: time.format('HH:mm'),
+                days,
+                datasets,
+                source_id: sourceId,
+                publish_mode: sourceId === 'easy_tdx' ? 'shadow' : 'official',
+            });
+            if (response?.data?.job) {
+                setActiveJob(response.data.job);
+                message.success(`同步任务已提交: ${response.data.job.job_id}`);
+            } else {
+                message.success('已派发同步任务（后台执行）');
+            }
         } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : '未知错误';
-            message.error(`触发同步失败: ${msg}`);
+            message.error(`触发同步失败: ${describeError(err)}`);
         } finally {
             setRunning(false);
         }
     };
+
+    const handleCancel = async () => {
+        if (!activeJob) return;
+        setCancelling(true);
+        try {
+            await dataPlatformService.cancelDataSourceSyncJob(activeJob.job_id);
+            setActiveJob({ ...activeJob, status: 'cancelling' });
+            message.info('取消信号已发送，当前标的完成后将停止');
+        } catch (err: unknown) {
+            message.error(`取消失败: ${describeError(err)}`);
+        } finally {
+            setCancelling(false);
+        }
+    };
+
+    const isJobActive = !!activeJob && ACTIVE_JOB_STATUSES.includes(activeJob.status);
+    const progress = activeJob?.status === 'completed'
+        ? 100
+        : activeJob?.total
+            ? Math.round(((activeJob.done || 0) / activeJob.total) * 100)
+            : 0;
 
     return (
         <div className="mt-4 p-3 rounded-lg border border-dashed border-amber-400/60 bg-amber-50/40">
@@ -235,11 +354,61 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                     icon={<ThunderboltOutlined />}
                     onClick={handleRunNow}
                     loading={running}
-                    disabled={!enabled}
+                    disabled={!enabled || isJobActive}
                 >
-                    立即同步一次
+                    {isJobActive ? '同步任务执行中' : '立即同步一次'}
                 </Button>
+                {isJobActive && activeJob?.status !== 'cancelling' && (
+                    <Button
+                        size="small"
+                        danger
+                        icon={<StopOutlined />}
+                        onClick={handleCancel}
+                        loading={cancelling}
+                    >
+                        取消
+                    </Button>
+                )}
             </div>
+            {activeJob && market === 'A' && (
+                <div className="mt-3 border-t border-amber-200 pt-3">
+                    <div className="flex items-center justify-between gap-3 mb-1">
+                        <Space wrap size="small">
+                            <Tag color={activeJob.status === 'failed'
+                                ? 'red'
+                                : activeJob.status === 'completed'
+                                    ? 'green'
+                                    : activeJob.status === 'cancelled'
+                                        ? 'orange'
+                                        : 'blue'}
+                            >
+                                {activeJob.status}
+                            </Tag>
+                            <Text className="text-xs">
+                                {activeJob.current || activeJob.stage}
+                            </Text>
+                        </Space>
+                        <Text type="secondary" className="text-xs">
+                            {activeJob.done || 0}/{activeJob.total ?? '待计算'}
+                        </Text>
+                    </div>
+                    <Progress
+                        percent={progress}
+                        size="small"
+                        status={activeJob.status === 'failed'
+                            ? 'exception'
+                            : activeJob.status === 'completed'
+                                ? 'success'
+                                : 'active'}
+                    />
+                    <Text type="secondary" className="text-xs">
+                        任务编号 {activeJob.job_id}
+                    </Text>
+                    {activeJob.error && (
+                        <Alert className="mt-2" type="error" showIcon message={activeJob.error} />
+                    )}
+                </div>
+            )}
         </div>
     );
 };

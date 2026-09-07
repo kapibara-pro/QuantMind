@@ -436,7 +436,11 @@ async def create_data_source_sync_job(
             )
 
     from backend.services.engine.qlib_app.celery_config import celery_app
-    from backend.shared.data_sync_jobs import create_job, upsert_job
+    from backend.shared.data_sync_jobs import (
+        ActiveSyncJobError,
+        create_job,
+        upsert_job,
+    )
 
     try:
         job = create_job(
@@ -462,6 +466,14 @@ async def create_data_source_sync_job(
             kwargs={"job_id": job["job_id"]},
             queue=queue,
         )
+    except ActiveSyncJobError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{payload.source_id} 已有同步任务正在执行: "
+                f"{exc.job.get('job_id', 'unknown')}"
+            ),
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         if "job" in locals():
             upsert_job(

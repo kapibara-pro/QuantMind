@@ -481,6 +481,16 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
+    async listDataSourceSyncJobs(limit = 50): Promise<{
+        jobs: DataSourceSyncJob[];
+        timestamp: string;
+    }> {
+        const resp = await this.axiosInstance.get('/admin/data-platform/sync-jobs', {
+            params: { limit },
+        });
+        return this.unwrap(resp);
+    }
+
     async cancelDataSourceSyncJob(jobId: string): Promise<{
         job_id: string;
         status: string;

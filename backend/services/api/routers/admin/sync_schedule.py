@@ -70,6 +70,24 @@ def _scheduler():
     return MARKETS, get_all_schedules, get_schedule, save_schedule, run_market_sync
 
 
+def _validate_schedule_payload(market: str, payload: SyncScheduleRequest) -> None:
+    if market != "A" and payload.source_id != "quantdb":
+        raise HTTPException(status_code=400, detail="easy_tdx 仅支持 A 股市场")
+    if payload.source_id == "easy_tdx" and payload.publish_mode != "shadow":
+        raise HTTPException(status_code=400, detail="easy_tdx 第一版仅支持影子落盘")
+    if payload.source_id == "easy_tdx" and payload.with_qlib:
+        raise HTTPException(status_code=400, detail="easy_tdx 尚不能直接重建 Qlib")
+    if payload.source_id == "easy_tdx" and payload.datasets:
+        from backend.services.engine.data_platform.easy_tdx_sync import DATASETS
+
+        unknown = [name for name in payload.datasets if name not in DATASETS]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"easy_tdx 不支持数据集: {unknown[0]}",
+            )
+
+
 @router.get("/sync-schedule")
 async def list_schedules(current_user: dict = Depends(require_admin)):
     MARKETS, get_all_schedules, *_ = _scheduler()
@@ -103,21 +121,7 @@ async def save_market_schedule(
     market = market.upper()
     if market not in MARKETS:
         raise HTTPException(status_code=404, detail=f"未知市场: {market}")
-    if market != "A" and payload.source_id != "quantdb":
-        raise HTTPException(status_code=400, detail="easy_tdx 仅支持 A 股市场")
-    if payload.source_id == "easy_tdx" and payload.publish_mode != "shadow":
-        raise HTTPException(status_code=400, detail="easy_tdx 第一版仅支持影子落盘")
-    if payload.source_id == "easy_tdx" and payload.with_qlib:
-        raise HTTPException(status_code=400, detail="easy_tdx 尚不能直接重建 Qlib")
-    if payload.source_id == "easy_tdx" and payload.datasets:
-        from backend.services.engine.data_platform.easy_tdx_sync import DATASETS
-
-        unknown = [name for name in payload.datasets if name not in DATASETS]
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail=f"easy_tdx 不支持数据集: {unknown[0]}",
-            )
+    _validate_schedule_payload(market, payload)
     saved = save_schedule(
         market,
         {
@@ -138,16 +142,49 @@ async def save_market_schedule(
 
 @router.post("/sync-schedule/{market}/run")
 async def run_market_schedule_now(
-    market: str, current_user: dict = Depends(require_admin)
+    market: str,
+    payload: SyncScheduleRequest | None = None,
+    current_user: dict = Depends(require_admin),
 ):
-    """立即触发一次该市场的定时同步（按已保存配置）。"""
+    """立即触发一次同步；请求体为空时使用已保存配置。"""
     MARKETS, _, get_schedule, _, run_market_sync = _scheduler()
     market = market.upper()
     if market not in MARKETS:
         raise HTTPException(status_code=404, detail=f"未知市场: {market}")
-    cfg = get_schedule(market)
-    if not cfg.get("enabled"):
+    schedule = payload or SyncScheduleRequest(**get_schedule(market))
+    if not schedule.enabled:
         raise HTTPException(status_code=400, detail="该市场定时同步未启用，请先保存配置")
+    _validate_schedule_payload(market, schedule)
+
+    cfg = schedule.model_dump()
+    if market == "A":
+        from backend.services.api.routers.admin.data_platform import (
+            DataSourceSyncRequest,
+            create_data_source_sync_job,
+        )
+
+        response = await create_data_source_sync_job(
+            DataSourceSyncRequest(
+                source_id=schedule.source_id,
+                market=market,
+                datasets=list(schedule.datasets),
+                days=schedule.days,
+                publish_mode=schedule.publish_mode,
+                with_pg=False,
+                with_qlib=schedule.with_qlib,
+            ),
+            current_user,
+        )
+        job = response["data"]["job"]
+        return {
+            "success": True,
+            "data": {
+                "market": market,
+                "label": MARKETS[market],
+                "status": job["status"],
+                "job": job,
+            },
+        }
 
     from backend.services.engine.qlib_app.celery_config import celery_app
 
