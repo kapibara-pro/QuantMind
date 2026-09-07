@@ -30,6 +30,7 @@ import {
 
 const { Text } = Typography;
 const JOB_POLL_INTERVAL_MS = 2500;
+const DATA_SOURCE_SYNC_STARTED_EVENT = 'quantmind:data-sync-started';
 
 const SOURCE_FALLBACKS: DataSyncSource[] = [
     {
@@ -145,6 +146,42 @@ export const AShareDataSourcePanel: React.FC = () => {
     useEffect(() => {
         if (sourceId === 'easy_tdx') loadServers();
     }, [loadServers, sourceId]);
+
+    // The schedule panel can start the same job. Keep this panel as the single
+    // progress owner and recover jobs after refresh or a schedule-triggered run.
+    useEffect(() => {
+        let cancelled = false;
+        const recoverActiveJob = async () => {
+            try {
+                const response = await dataPlatformService.listDataSourceSyncJobs();
+                const job = response.jobs.find(
+                    (item) => item.market === 'A'
+                        && item.source_id === sourceId
+                        && ['queued', 'running', 'cancelling'].includes(item.status),
+                );
+                if (!cancelled) {
+                    setActiveJob(job ?? null);
+                    setSyncing(Boolean(job));
+                }
+            } catch (error) {
+                console.error('[AShareDataSourcePanel] recover active job failed', error);
+            }
+        };
+        const handleExternalStart = (event: Event) => {
+            const job = (event as CustomEvent<DataSourceSyncJob>).detail;
+            if (job?.market === 'A' && job.source_id === sourceId) {
+                setActiveJob(job);
+                setSyncing(true);
+            }
+        };
+
+        recoverActiveJob();
+        window.addEventListener(DATA_SOURCE_SYNC_STARTED_EVENT, handleExternalStart);
+        return () => {
+            cancelled = true;
+            window.removeEventListener(DATA_SOURCE_SYNC_STARTED_EVENT, handleExternalStart);
+        };
+    }, [sourceId]);
 
     useEffect(() => {
         if (!activeJob || !['queued', 'running', 'cancelling'].includes(activeJob.status)) {
