@@ -174,6 +174,17 @@ if os.getenv("MARKET_SNAPSHOT_ENABLED", "true").lower() == "true":
         "schedule": crontab(minute="10", hour="4", day_of_week="1-5"),
     }
 
+# 同花顺选股/情绪/板块历史快照。默认关闭，配置 API Key 后显式开启。
+if os.getenv("HITHINK_FINANCE_SNAPSHOT_ENABLED", "false").lower() == "true":
+    beat_schedule["ths-daily-snapshot"] = {
+        "task": "engine.tasks.ths_daily_snapshot",
+        "schedule": crontab(minute=30, hour=18, day_of_week="1-5"),
+    }
+    beat_schedule["ths-auction-snapshot"] = {
+        "task": "engine.tasks.ths_auction_snapshot",
+        "schedule": crontab(minute=35, hour=9, day_of_week="1-5"),
+    }
+
 celery_app.conf.update(
     # 序列化
     task_serializer="json",

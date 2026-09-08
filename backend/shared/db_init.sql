@@ -460,6 +460,62 @@ CREATE TABLE IF NOT EXISTS qm_research_candidate_snapshot (
 );
 
 -- ========================
+-- 15b. QM_THS_DAILY_SNAPSHOTS
+-- ========================
+-- 同花顺选股、情绪、竞价和板块的原始每日快照。
+-- scope_key 使用内部前缀式代码（如 SH600519）；市场级响应使用 __market__。
+CREATE TABLE IF NOT EXISTS qm_ths_daily_snapshots (
+    id                  BIGSERIAL PRIMARY KEY,
+    snapshot_date       DATE NOT NULL,
+    dataset             TEXT NOT NULL,
+    scope_key           TEXT NOT NULL,
+    symbol              TEXT,
+    as_of_ms            BIGINT,
+    payload             JSONB NOT NULL,
+    source_request_id   TEXT,
+    row_count           INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'success',
+    schema_version      TEXT NOT NULL DEFAULT 'ths_snapshot_v1',
+    captured_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (snapshot_date, dataset, scope_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_date
+    ON qm_ths_daily_snapshots (snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_dataset
+    ON qm_ths_daily_snapshots (dataset, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_symbol
+    ON qm_ths_daily_snapshots (symbol, snapshot_date);
+
+-- 同花顺快照的统一查询入口。payload 保留上游原始字段，按业务域提供薄视图。
+CREATE OR REPLACE VIEW v_ths_daily_snapshot AS
+SELECT snapshot_date AS trade_date, dataset, scope_key, symbol, as_of_ms,
+       payload, source_request_id, row_count, status, schema_version,
+       captured_at, 'ths'::TEXT AS source
+FROM qm_ths_daily_snapshots;
+
+CREATE OR REPLACE VIEW v_ths_stock_selection_daily AS
+SELECT * FROM v_ths_daily_snapshot
+WHERE dataset IN ('ticker_catalog', 'valuation_snapshot', 'financial_snapshot');
+
+CREATE OR REPLACE VIEW v_ths_emotion_daily AS
+SELECT * FROM v_ths_daily_snapshot
+WHERE dataset IN (
+    'limit_up_pool', 'limit_down_pool', 'limit_break_pool',
+    'limit_up_ladder', 'anomaly_list', 'skyrocket_list',
+    'hot_stock_list', 'hot_stock_list_history', 'dragon_tiger_all'
+);
+
+CREATE OR REPLACE VIEW v_ths_auction_daily AS
+SELECT * FROM v_ths_daily_snapshot
+WHERE dataset IN ('auction_snapshot', 'auction_short_term_benchmark');
+
+CREATE OR REPLACE VIEW v_ths_sector_daily AS
+SELECT * FROM v_ths_daily_snapshot
+WHERE dataset LIKE 'index_catalog_%'
+   OR dataset IN ('index_snapshot', 'index_constituents');
+
+-- ========================
 -- 16. QM_TRADING_AGENTS_HISTORY
 -- ========================
 CREATE TABLE IF NOT EXISTS qm_trading_agents_history (

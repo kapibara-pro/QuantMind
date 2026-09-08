@@ -20,6 +20,7 @@ from .qlib_console import router as qlib_console_router
 from .system_update import router as system_update_router
 from .node_history import router as node_history_router
 from .system_events import router as system_events_router
+from .ths_snapshot_console import router as ths_snapshot_console_router
 
 admin_router = APIRouter()
 admin_router.include_router(
@@ -45,6 +46,11 @@ admin_router.include_router(
 )
 admin_router.include_router(
     quantdb_console_router, prefix="/data-platform/quantdb", tags=["Admin-QuantDB"]
+)
+admin_router.include_router(
+    ths_snapshot_console_router,
+    prefix="/data-platform/ths-snapshots",
+    tags=["Admin-THSSnapshots"],
 )
 admin_router.include_router(
     quantus_console_router, prefix="/data-platform/quantus", tags=["Admin-QuantUS"]

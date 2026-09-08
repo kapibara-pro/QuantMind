@@ -225,6 +225,52 @@ export interface QuantDBPreview {
     timestamp: string;
 }
 
+export interface ThsSnapshotGroup {
+    id: string;
+    name: string;
+    category_id: string;
+    dataset_count: number;
+    available_count: number;
+    rows_total: number;
+}
+
+export interface ThsSnapshotDataset {
+    dataset: string;
+    name: string;
+    group: 'selection' | 'emotion' | 'auction' | 'sector';
+    note: string;
+    storage_type: 'postgres_snapshot';
+    available: boolean;
+    start_date?: string | null;
+    end_date?: string | null;
+    snapshot_days: number;
+    rows_total: number;
+    latest_rows: number;
+    updated_at?: string | null;
+}
+
+export interface ThsSnapshotPreview {
+    dataset: string;
+    snapshot_date?: string | null;
+    rows_total: number;
+    payload_fields: string[];
+    data: Array<{
+        id: number;
+        snapshot_date: string;
+        dataset: string;
+        scope_key: string;
+        symbol?: string | null;
+        as_of_ms?: number | null;
+        payload: Record<string, unknown>;
+        source_request_id?: string | null;
+        row_count: number;
+        status: string;
+        schema_version: string;
+        captured_at: string;
+    }>;
+    timestamp: string;
+}
+
 export interface QuantDBSyncJob {
     job_id: string;
     status: 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
@@ -761,6 +807,35 @@ class DataPlatformService {
         const resp = await this.axiosInstance.get('/admin/data-platform/quantdb/catalog', {
             timeout: 120000, // 目录统计需遍历数万个 parquet 文件
         });
+        return this.unwrap(resp);
+    }
+
+    async getThsSnapshotCatalog(): Promise<{
+        source: 'ths';
+        storage_type: 'postgres_snapshot';
+        table_ready: boolean;
+        api_key_configured: boolean;
+        schedule_enabled: boolean;
+        groups: ThsSnapshotGroup[];
+        datasets: ThsSnapshotDataset[];
+        timestamp: string;
+    }> {
+        const resp = await this.axiosInstance.get(
+            '/admin/data-platform/ths-snapshots/catalog',
+        );
+        return this.unwrap(resp);
+    }
+
+    async previewThsSnapshot(params: {
+        dataset: string;
+        snapshot_date?: string;
+        symbol?: string;
+        limit?: number;
+    }): Promise<ThsSnapshotPreview> {
+        const resp = await this.axiosInstance.get(
+            '/admin/data-platform/ths-snapshots/preview',
+            { params },
+        );
         return this.unwrap(resp);
     }
 
