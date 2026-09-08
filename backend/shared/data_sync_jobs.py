@@ -12,6 +12,7 @@ KEY_PREFIX = "quantmind:data_sync:job:"
 ACTIVE_KEY_PREFIX = "quantmind:data_sync:active:"
 TTL_SECONDS = 24 * 3600
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
+CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 
 
 class ActiveSyncJobError(RuntimeError):
@@ -54,7 +55,7 @@ def _release_active_job(client: Any, job_id: str, market: str, source_id: str) -
 
 
 def upsert_job(job_id: str, **fields: Any) -> None:
-    payload = {"job_id": job_id, **fields}
+    payload = {"job_id": job_id, "updated_at": _now_iso(), **fields}
     client = _redis()
     client.hset(
         KEY_PREFIX + job_id,
@@ -156,11 +157,13 @@ def create_job(
         "with_qlib": with_qlib,
         "done": 0,
         "total": None,
+        "progress": 0,
         "current": "等待 worker 执行",
         "cancel_requested": False,
         "result": None,
         "error": None,
         "started_at": _now_iso(),
+        "updated_at": _now_iso(),
         "finished_at": None,
         "started_by": started_by,
     }
@@ -192,6 +195,64 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             job[key] = value
     return job
+
+
+def reconcile_job(job_id: str) -> dict[str, Any] | None:
+    """Turn worker loss or a dead Qlib heartbeat into a terminal job state."""
+    job = get_job(job_id)
+    if not job or job.get("status") not in ACTIVE_STATUSES:
+        return job
+
+    celery_task_id = str(job.get("celery_task_id") or "").strip()
+    if celery_task_id:
+        try:
+            from backend.services.engine.qlib_app.celery_config import celery_app
+
+            async_result = celery_app.AsyncResult(celery_task_id)
+            if str(async_result.state).upper() in CELERY_FAILURE_STATES:
+                reason = str(async_result.result or "Celery worker 异常退出")
+                upsert_job(
+                    job_id,
+                    status="failed",
+                    stage="worker_failed",
+                    current=None,
+                    error=reason,
+                    finished_at=_now_iso(),
+                )
+                return get_job(job_id)
+        except Exception:
+            # Redis backend unavailable should not make the status endpoint fail.
+            pass
+
+    if str(job.get("stage") or "").startswith("qlib"):
+        try:
+            stale_seconds = max(int(os.getenv("QLIB_JOB_STALE_SECONDS", "300")), 60)
+        except ValueError:
+            stale_seconds = 300
+        raw_updated = str(job.get("updated_at") or job.get("started_at") or "")
+        try:
+            updated = datetime.fromisoformat(raw_updated.replace("Z", "+00:00"))
+        except ValueError:
+            updated = datetime.now(timezone.utc)
+        if (datetime.now(timezone.utc) - updated).total_seconds() > stale_seconds:
+            upsert_job(
+                job_id,
+                status="failed",
+                stage="worker_lost",
+                current=None,
+                error=(
+                    f"Qlib 构建超过 {stale_seconds} 秒没有心跳，"
+                    "worker 可能因内存不足退出"
+                ),
+                finished_at=_now_iso(),
+            )
+            return get_job(job_id)
+    return job
+
+
+def reconcile_jobs(limit: int = 50) -> list[dict[str, Any]]:
+    jobs = list_jobs(limit)
+    return [reconcile_job(str(job["job_id"])) or job for job in jobs]
 
 
 def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
@@ -229,6 +290,7 @@ def progress_callback(job_id: str):
                 status="running",
                 stage="fetch",
                 total=data.get("total"),
+                progress=0,
                 current="开始拉取行情",
             )
         elif event == "symbol":
@@ -260,32 +322,47 @@ def progress_callback(job_id: str):
                 stage="publish_prepare",
                 done=0,
                 total=data.get("total"),
+                progress=0,
                 current="质量校验通过，准备正式分区",
             )
         elif event == "publish_partition":
+            done = data.get("done", 0)
+            total = data.get("total") or 0
             upsert_job(
                 job_id,
                 stage="publish",
-                done=data.get("done", 0),
-                total=data.get("total"),
+                done=done,
+                total=total,
+                progress=round(100 * done / total) if total else 0,
                 current=f"发布 {data.get('dataset')} / {data.get('date')}",
             )
         elif event == "publish_qlib":
             progress = data.get("progress")
-            suffix = f"（{progress}%）" if progress is not None else ""
+            done = data.get("done", 0)
+            total = data.get("total") or 0
+            overall = (
+                round(100 * (done + float(progress or 0) / 100) / total)
+                if total
+                else int(progress or 0)
+            )
             upsert_job(
                 job_id,
                 stage="qlib",
-                done=data.get("done", 0),
-                total=data.get("total"),
-                current=f"重建并切换 Qlib 训练数据{suffix}",
+                substage=data.get("phase") or "build",
+                done=done,
+                total=total,
+                progress=overall,
+                current=data.get("current") or "重建并切换 Qlib 训练数据",
             )
         elif event == "publish_pg":
+            done = data.get("done", 0)
+            total = data.get("total") or 0
             upsert_job(
                 job_id,
                 stage="pg",
-                done=data.get("done", 0),
-                total=data.get("total"),
+                done=done,
+                total=total,
+                progress=round(100 * done / total) if total else 0,
                 current="更新 PostgreSQL 行情投影",
             )
         elif event == "publish_complete":
@@ -294,6 +371,7 @@ def progress_callback(job_id: str):
                 stage="finalizing",
                 done=data.get("done", 0),
                 total=data.get("total"),
+                progress=100,
                 current="写入发布清单",
             )
 

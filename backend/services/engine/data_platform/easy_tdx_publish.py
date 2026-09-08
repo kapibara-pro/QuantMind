@@ -197,11 +197,12 @@ def _publish_locked(
                 target_root,
                 dates[-1],
                 progress_cb=(
-                    lambda percent: progress_cb(
+                    lambda percent, **details: progress_cb(
                         "publish_qlib",
                         done=done,
                         total=total,
                         progress=percent,
+                        **details,
                     )
                     if progress_cb
                     else None

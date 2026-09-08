@@ -491,15 +491,18 @@ async def create_data_source_sync_job(
             or "admin",
         )
         queue = (
-            os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync")
-            if payload.source_id == "quantdb"
-            else os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv")
+            os.getenv("QLIB_BUILD_QUEUE", "qlib_build")
+            if payload.with_qlib
+            else os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync")
         )
-        celery_app.send_task(
+        async_result = celery_app.send_task(
             "engine.tasks.run_data_source_sync",
             kwargs={"job_id": job["job_id"]},
             queue=queue,
         )
+        celery_task_id = getattr(async_result, "id", None)
+        if celery_task_id:
+            upsert_job(job["job_id"], celery_task_id=celery_task_id)
     except ActiveSyncJobError as exc:
         raise HTTPException(
             status_code=409,
@@ -526,11 +529,11 @@ async def list_data_source_sync_jobs(
     limit: int = Query(50, ge=1, le=200),
     current_user: dict = Depends(require_admin),
 ):
-    from backend.shared.data_sync_jobs import list_jobs
+    from backend.shared.data_sync_jobs import reconcile_jobs
 
     return {
         "success": True,
-        "data": {"jobs": list_jobs(limit), "timestamp": _now_iso()},
+        "data": {"jobs": reconcile_jobs(limit), "timestamp": _now_iso()},
     }
 
 
@@ -539,9 +542,9 @@ async def get_data_source_sync_job(
     job_id: str,
     current_user: dict = Depends(require_admin),
 ):
-    from backend.shared.data_sync_jobs import get_job
+    from backend.shared.data_sync_jobs import reconcile_job
 
-    job = get_job(job_id)
+    job = reconcile_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
     return {"success": True, "data": {"job": job}}

@@ -13,8 +13,13 @@ Qlib binary 格式要求：
 from __future__ import annotations
 
 import logging
+import math
+import os
 import struct
+import threading
+from contextlib import contextmanager
 from datetime import date, datetime
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +70,81 @@ CN_QLIB_INDEX_SYMBOLS: list[str] = [
 ]
 
 _MARKET_HUB_FACTORY = {}
+
+
+def _report_progress(
+    callback,
+    percent: int,
+    *,
+    phase: str | None = None,
+    current: str | None = None,
+) -> None:
+    """Report progress while remaining compatible with legacy one-arg callbacks."""
+    if not callable(callback):
+        return
+    value = max(0, min(100, int(percent)))
+    details = {
+        key: item
+        for key, item in {"phase": phase, "current": current}.items()
+        if item is not None
+    }
+    try:
+        parameters = signature(callback).parameters
+        accepts_details = any(
+            parameter.kind == Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ) or all(key in parameters for key in details)
+    except (TypeError, ValueError):
+        accepts_details = False
+    try:
+        callback(value, **details) if accepts_details else callback(value)
+    except Exception:  # noqa: BLE001 - progress must never break a build
+        pass
+
+
+@contextmanager
+def _read_progress_heartbeat(progress_cb):
+    """Keep the job alive while DuckDB prepares an externally sorted query."""
+    _report_progress(
+        progress_cb,
+        8,
+        phase="read",
+        current="正在读取并关联后复权与未复权行情",
+    )
+    if not callable(progress_cb):
+        yield
+        return
+
+    try:
+        interval = max(
+            float(os.getenv("QLIB_PROGRESS_HEARTBEAT_SECONDS", "15")), 1.0
+        )
+    except ValueError:
+        interval = 15.0
+    stopped = threading.Event()
+
+    def _heartbeat() -> None:
+        elapsed = 0.0
+        while not stopped.wait(interval):
+            elapsed += interval
+            _report_progress(
+                progress_cb,
+                min(11, 8 + int(elapsed // 60)),
+                phase="read",
+                current=f"正在读取并关联行情（已等待 {int(elapsed)} 秒）",
+            )
+
+    thread = threading.Thread(
+        target=_heartbeat,
+        name="qlib-read-progress",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1)
 
 
 def _register_market_hub(market: str, builder_cls: type):
@@ -162,12 +242,13 @@ class QlibDataBuilder:
         Returns:
             {"calendar": int, "instruments": int, "features": int, "skipped": int}
         """
-        def _notify(p: int) -> None:
-            if callable(progress_cb):
-                try:
-                    progress_cb(max(0, min(100, p)))
-                except Exception:  # noqa: BLE001 - 进度回调非关键路径
-                    pass
+        def _notify(p: int, *, phase: str, current: str) -> None:
+            _report_progress(
+                progress_cb,
+                p,
+                phase=phase,
+                current=current,
+            )
 
         if not self._hub.available:
             raise RuntimeError(f"数据目录不可用: {self._hub.data_dir}")
@@ -175,21 +256,21 @@ class QlibDataBuilder:
         result: dict = {}
 
         # 1. 构建交易日历
-        _notify(2)
+        _notify(2, phase="calendar", current="正在生成 Qlib 交易日历")
         result["calendar"] = self.build_calendar()
 
         # 2. 构建标的列表
-        _notify(5)
+        _notify(5, phase="instruments", current="正在生成 Qlib 标的列表")
         result["instruments"] = self.build_instruments()
 
         # 3. 构建特征 binary
-        _notify(8)
+        _notify(8, phase="read", current="准备读取行情数据")
         feat_result = self.build_features(
             symbols=symbols, incremental=incremental, progress_cb=progress_cb
         )
         result["features"] = feat_result["updated"]
         result["skipped"] = feat_result["skipped"]
-        _notify(95)
+        _notify(95, phase="verify", current="Qlib 特征写入完成，正在校验")
 
         logger.info(
             "QlibDataBuilder[%s] 完成: calendar=%d, instruments=%d, features=%d, skipped=%d",
@@ -426,8 +507,8 @@ class QlibDataBuilder:
     ) -> dict:
         """从 parquet 后复权 K 线生成 features/*.day.bin。
 
-        CN 与非 CN 一律走批量构建（一次读入全市场再按标的分组写 bin），
-        比逐标的串行快 1~2 个量级。`incremental` 参数保留以兼容调用方，
+        CN 与非 CN 一律走批量构建（流式扫描全市场并按标的写 bin），
+        比逐标的全库扫描快 1~2 个量级。`incremental` 参数保留以兼容调用方，
         批量构建是整库重写，天然与上游 FULL_REWRITE（分红复权）保持一致。
         """
         if symbols is None:
@@ -512,14 +593,15 @@ class QlibDataBuilder:
         symbols: list[str] | None = None,
         progress_cb=None,
     ) -> dict:
-        """一次扫描全市场 parquet，按标的分组写 bin。
+        """流式扫描全市场 parquet，按标的分组写 bin。
 
         - CN: ``close_bin = 未复权价 x 乘法因子``，因子由 dividend_factors 除权
           事件累乘 ``PROD(p0/ref)`` 得到（阶梯型、单调不降）。daily_backward 只
           提供 volume/amount 与事件表缺失时的回退因子。
         - 非 CN（US/HK/CRYPTO/FUTURES）: 只有 daily_forward，factor 恒为 1.0。
 
-        整体读入再 groupby，避免逐标的全库扫描导致 OOM / 数小时耗时。
+        DuckDB 负责外部排序和 JOIN，Python 每次只持有一个有界 DataFrame
+        chunk 与跨 chunk 的单个标的，避免把两套全历史行情一次性物化进 Pandas。
 
         symbols: 可选子集（qlib 格式）；None 则覆盖 parquet 中全部标的。
         """
@@ -535,77 +617,79 @@ class QlibDataBuilder:
         kline_sub = "daily_backward" if is_cn else "daily_forward"
         kline_glob = str(self._hub.data_dir / f"1_kline_data/{kline_sub}/dt=*/data.parquet")
 
-        con = duckdb.connect(config={"memory_limit": "8GB", "threads": "4"})
         try:
-            if is_cn:
-                # 未复权价单独取回：close_bin 要写成 raw x 乘法因子，不能再拿 hfq 当价格
-                unadj_glob = str(self._hub.data_dir / "1_kline_data/daily_unadjusted/dt=*/data.parquet")
-                df = con.execute(
-                    f"""
-                    SELECT k.symbol,
-                           CAST(k.time AS DATE) AS d,
-                           k.open, k.high, k.low, k.close, k.volume, k.amount,
-                           u.open AS raw_open, u.high AS raw_high, u.low AS raw_low,
-                           u.close AS raw_close,
-                           k.close / NULLIF(u.close, 0.0) AS factor
-                    FROM read_parquet('{kline_glob}', hive_partitioning=1) k
-                    LEFT JOIN read_parquet('{unadj_glob}', hive_partitioning=1) u
-                      ON u.symbol = k.symbol AND CAST(u.time AS DATE) = CAST(k.time AS DATE)
-                    WHERE k.close > 0 AND u.close > 0
-                    ORDER BY k.symbol, d
-                    """
-                ).fetchdf()
-            else:
-                df = con.execute(
-                    f"""
-                    SELECT symbol, CAST(time AS DATE) d,
-                           open, high, low, close, volume, amount
-                    FROM read_parquet('{kline_glob}', hive_partitioning=1)
-                    ORDER BY symbol, d
-                    """
-                ).fetchdf()
-                if not df.empty:
-                    df["factor"] = np.ones(len(df), dtype=np.float64)
-        finally:
-            con.close()
+            duckdb_threads = max(
+                1, min(int(os.getenv("QLIB_DUCKDB_THREADS", "2")), 4)
+            )
+        except ValueError:
+            duckdb_threads = 2
+        memory_limit = os.getenv("QLIB_DUCKDB_MEMORY_LIMIT", "3GB").strip() or "3GB"
+        temp_dir = Path(
+            os.getenv(
+                "QLIB_DUCKDB_TEMP_DIR",
+                str(self._qlib_dir.parent / ".duckdb_tmp"),
+            )
+        )
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            fetch_rows = max(
+                int(os.getenv("QLIB_DUCKDB_FETCH_ROWS", "65536")), 2048
+            )
+        except ValueError:
+            fetch_rows = 65536
+        vectors_per_chunk = max(1, math.ceil(fetch_rows / 2048))
 
-        if df.empty:
-            return {"updated": 0, "skipped": 0}
+        requested_qdb = (
+            sorted({self._to_qdb_symbol(symbol) for symbol in symbols})
+            if symbols is not None
+            else []
+        )
+        params: list[str] = requested_qdb
+        symbol_filter = ""
+        if requested_qdb:
+            placeholders = ", ".join("?" for _ in requested_qdb)
+            symbol_filter = f" AND k.symbol IN ({placeholders})"
 
-        df["ci"] = df["d"].astype(str).map(cal_index)
-        df = df[df["ci"].notna()]
-        df["ci"] = df["ci"].astype(np.int64)
-
-        if symbols is not None:
-            # all.txt 中的 symbol 已小写（_feat_dir_name 规则），而 parquet 原生
-            # symbol 保留大小写，非 CN 市场过滤需两侧都小写比较
-            if not is_cn:
-                qlib_wanted = {s.lower() for s in symbols}
-                df = df[df["symbol"].map(self._to_qlib_symbol).str.lower().isin(qlib_wanted)]
-            else:
-                qlib_wanted = set(symbols)
-                df = df[df["symbol"].map(self._to_qlib_symbol).isin(qlib_wanted)]
-
+        con = duckdb.connect(
+            config={
+                "memory_limit": memory_limit,
+                "threads": str(duckdb_threads),
+                "temp_directory": str(temp_dir),
+            }
+        )
         updated = skipped = 0
         factor_fallback = 0
-        total_syms = int(df["symbol"].nunique()) if not df.empty else 0
         processed = 0
-        for qdb_sym, group in df.groupby("symbol", sort=False):
+        estimated_total = len(requested_qdb) or len(self._get_all_symbols())
+
+        def _prepare_chunk(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty:
+                return frame
+            frame = frame.copy()
+            frame["ci"] = frame["d"].astype(str).map(cal_index)
+            frame = frame[frame["ci"].notna()]
+            if not frame.empty:
+                frame["ci"] = frame["ci"].astype(np.int64)
+            return frame
+
+        def _write_group(qdb_sym: str, group: pd.DataFrame) -> None:
+            nonlocal updated, skipped, factor_fallback, processed
+            if group.empty:
+                return
             processed += 1
-            # 特征阶段占据总耗时主体（8~95%）：按批次上报进度，让上层看到"在动"并续心跳
-            if callable(progress_cb) and total_syms and (processed % 20 == 0 or processed == total_syms):
-                try:
-                    progress_cb(int(8 + 87 * processed / total_syms))
-                except Exception:  # noqa: BLE001 - 进度回调非关键路径
-                    pass
+            total = max(estimated_total, processed)
+            _report_progress(
+                progress_cb,
+                int(12 + 83 * processed / total),
+                phase="write",
+                current=f"正在写入 Qlib 特征 {processed}/{total}（{qdb_sym}）",
+            )
             qlib_sym = self._to_qlib_symbol(qdb_sym)
             positions = group["ci"].values
             start_idx = int(positions.min())
             span = int(positions.max()) - start_idx + 1
             offsets = positions - start_idx
 
-            # qlib 的 FileFeatureStorage 强制 instrument.lower() 拼路径，
-            # 目录必须小写否则读取静默为空
             feat_dir = self._qlib_dir / "features" / self._feat_dir_name(qlib_sym)
             feat_dir.mkdir(parents=True, exist_ok=True)
 
@@ -617,11 +701,12 @@ class QlibDataBuilder:
                 factor = group["factor"].values if is_cn else np.ones(len(group))
                 if is_cn:
                     f_mult = self._multiplicative_factor(
-                        qlib_sym, group["d"].values, group["raw_close"].values,
+                        qlib_sym,
+                        group["d"].values,
+                        group["raw_close"].values,
                         group["close"].values,
                     )
                     if f_mult is not None:
-                        # 价格序列整体换成 未复权价 x 乘法因子，保证 close/factor == raw
                         for field in ("open", "high", "low", "close"):
                             raw = group[f"raw_{field}"].values.astype(np.float64)
                             cols[field] = np.where(
@@ -639,10 +724,10 @@ class QlibDataBuilder:
                 f_aligned[offsets] = np.asarray(factor, dtype=np.float32)
                 aligned["factor"] = f_aligned
                 for field, arr in aligned.items():
-                    self._write_bin_file(feat_dir / f"{field}.day.bin", start_idx, arr)
+                    self._write_bin_file(
+                        feat_dir / f"{field}.day.bin", start_idx, arr
+                    )
                 if is_cn:
-                    # $change = pct_change(close)：除权日分母自然换成参考价，
-                    # CnExchange.check_stock_limit 读的就是这一列
                     close_arr = aligned["close"]
                     chg = np.full(span, np.nan, dtype=np.float32)
                     with np.errstate(invalid="ignore", divide="ignore"):
@@ -652,6 +737,65 @@ class QlibDataBuilder:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("构建 %s features 失败: %s", qlib_sym, exc)
                 skipped += 1
+
+        try:
+            if is_cn:
+                # 未复权价单独取回：close_bin 要写成 raw x 乘法因子，不能再拿 hfq 当价格
+                unadj_glob = str(self._hub.data_dir / "1_kline_data/daily_unadjusted/dt=*/data.parquet")
+                query = f"""
+                    SELECT k.symbol,
+                           CAST(k.time AS DATE) AS d,
+                           k.open, k.high, k.low, k.close, k.volume, k.amount,
+                           u.open AS raw_open, u.high AS raw_high, u.low AS raw_low,
+                           u.close AS raw_close,
+                           k.close / NULLIF(u.close, 0.0) AS factor
+                    FROM read_parquet('{kline_glob}', hive_partitioning=1) k
+                    LEFT JOIN read_parquet('{unadj_glob}', hive_partitioning=1) u
+                      ON u.symbol = k.symbol AND CAST(u.time AS DATE) = CAST(k.time AS DATE)
+                    WHERE k.close > 0 AND u.close > 0{symbol_filter}
+                    ORDER BY k.symbol, d
+                    """
+            else:
+                query = f"""
+                    SELECT k.symbol, CAST(k.time AS DATE) d,
+                           k.open, k.high, k.low, k.close, k.volume, k.amount
+                    FROM read_parquet('{kline_glob}', hive_partitioning=1) k
+                    WHERE 1 = 1{symbol_filter}
+                    ORDER BY k.symbol, d
+                    """
+
+            with _read_progress_heartbeat(progress_cb):
+                cursor = con.execute(query, params)
+            _report_progress(
+                progress_cb,
+                12,
+                phase="write",
+                current="行情读取与关联完成，开始分批写入特征",
+            )
+
+            carry: pd.DataFrame | None = None
+            while True:
+                chunk = cursor.fetch_df_chunk(vectors_per_chunk=vectors_per_chunk)
+                if chunk is None or chunk.empty:
+                    break
+                if not is_cn:
+                    chunk["factor"] = np.ones(len(chunk), dtype=np.float64)
+                if carry is not None and not carry.empty:
+                    chunk = pd.concat([carry, chunk], ignore_index=True)
+
+                last_symbol = chunk["symbol"].iloc[-1]
+                tail_mask = chunk["symbol"] == last_symbol
+                ready = _prepare_chunk(chunk.loc[~tail_mask])
+                carry = chunk.loc[tail_mask].copy()
+                for qdb_sym, group in ready.groupby("symbol", sort=False):
+                    _write_group(str(qdb_sym), group)
+
+            if carry is not None and not carry.empty:
+                ready = _prepare_chunk(carry)
+                for qdb_sym, group in ready.groupby("symbol", sort=False):
+                    _write_group(str(qdb_sym), group)
+        finally:
+            con.close()
 
         if is_cn and factor_fallback:
             logger.warning(

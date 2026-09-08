@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -235,6 +237,54 @@ def test_schedule_rejects_projection_without_publication():
         sync_schedule._validate_schedule_payload("A", payload)
 
 
+@pytest.mark.asyncio
+async def test_publish_job_is_dispatched_to_dedicated_qlib_queue(monkeypatch):
+    from backend.services.api.routers.admin import data_platform
+    from backend.services.engine.data_platform import source_catalog
+    from backend.services.engine.qlib_app.celery_config import celery_app
+    from backend.shared import data_source_config, data_sync_jobs
+
+    monkeypatch.setattr(
+        source_catalog,
+        "get_source_descriptor",
+        lambda _source_id: SimpleNamespace(markets=["A"], configurable=True),
+    )
+    monkeypatch.setattr(data_source_config, "is_source_enabled", lambda *_: True)
+    monkeypatch.setattr(
+        data_sync_jobs,
+        "create_job",
+        lambda **kwargs: {"job_id": "publish-queued", **kwargs},
+    )
+    updates: list[dict] = []
+    monkeypatch.setattr(
+        data_sync_jobs,
+        "upsert_job",
+        lambda _job_id, **fields: updates.append(fields),
+    )
+    sent: list[dict] = []
+
+    def _send_task(name, **kwargs):
+        sent.append({"name": name, **kwargs})
+        return SimpleNamespace(id="celery-publish-1")
+
+    monkeypatch.setattr(celery_app, "send_task", _send_task)
+
+    await data_platform.create_data_source_sync_job(
+        data_platform.DataSourceSyncRequest(
+            source_id="easy_tdx",
+            operation="publish",
+            market="A",
+            publish_mode="official",
+            with_pg=True,
+            with_qlib=True,
+        ),
+        {"username": "admin"},
+    )
+
+    assert sent[0]["queue"] == "qlib_build"
+    assert updates[-1]["celery_task_id"] == "celery-publish-1"
+
+
 class _JobRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
@@ -297,3 +347,110 @@ def test_same_source_job_lock_is_released_after_terminal_status(
     second = data_sync_jobs.create_job(**kwargs)
 
     assert second["job_id"] != first["job_id"]
+
+
+def test_qlib_progress_reports_overall_percent_and_detail(monkeypatch):
+    from backend.shared import data_sync_jobs
+
+    redis = _JobRedis()
+    monkeypatch.setattr(data_sync_jobs, "_redis", lambda: redis)
+    job = data_sync_jobs.create_job(
+        source_id="easy_tdx",
+        operation="publish",
+        market="A",
+        datasets=["daily_unadjusted", "daily_forward", "daily_backward"],
+        days=5,
+        symbols=[],
+        publish_mode="official",
+        with_pg=True,
+        with_qlib=True,
+        started_by="admin",
+    )
+    callback = data_sync_jobs.progress_callback(job["job_id"])
+
+    callback("publish_start", total=5)
+    callback(
+        "publish_qlib",
+        done=3,
+        total=5,
+        progress=50,
+        phase="write",
+        current="正在写入 Qlib 特征 1200/5000",
+    )
+
+    current = data_sync_jobs.get_job(job["job_id"])
+    assert current["progress"] == 70
+    assert current["substage"] == "write"
+    assert current["current"] == "正在写入 Qlib 特征 1200/5000"
+
+
+def test_stale_qlib_job_is_closed_as_worker_lost(monkeypatch):
+    from backend.shared import data_sync_jobs
+
+    redis = _JobRedis()
+    monkeypatch.setattr(data_sync_jobs, "_redis", lambda: redis)
+    monkeypatch.setenv("QLIB_JOB_STALE_SECONDS", "60")
+    job = data_sync_jobs.create_job(
+        source_id="easy_tdx",
+        operation="publish",
+        market="A",
+        datasets=["daily_unadjusted", "daily_forward", "daily_backward"],
+        days=5,
+        symbols=[],
+        publish_mode="official",
+        with_pg=True,
+        with_qlib=True,
+        started_by="admin",
+    )
+    data_sync_jobs.upsert_job(job["job_id"], status="running", stage="qlib")
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    redis.hashes[data_sync_jobs.KEY_PREFIX + job["job_id"]]["updated_at"] = json.dumps(
+        stale
+    )
+
+    reconciled = data_sync_jobs.reconcile_job(job["job_id"])
+
+    assert reconciled["status"] == "failed"
+    assert reconciled["stage"] == "worker_lost"
+    assert "没有心跳" in reconciled["error"]
+    assert redis.get(data_sync_jobs._active_key("A", "easy_tdx")) is None
+
+
+def test_celery_failure_state_closes_active_job(monkeypatch):
+    from backend.services.engine.qlib_app.celery_config import celery_app
+    from backend.shared import data_sync_jobs
+
+    redis = _JobRedis()
+    monkeypatch.setattr(data_sync_jobs, "_redis", lambda: redis)
+    job = data_sync_jobs.create_job(
+        source_id="easy_tdx",
+        operation="publish",
+        market="A",
+        datasets=["daily_unadjusted", "daily_forward", "daily_backward"],
+        days=5,
+        symbols=[],
+        publish_mode="official",
+        with_pg=True,
+        with_qlib=True,
+        started_by="admin",
+    )
+    data_sync_jobs.upsert_job(
+        job["job_id"],
+        status="running",
+        stage="qlib",
+        celery_task_id="celery-lost-1",
+    )
+    monkeypatch.setattr(
+        celery_app,
+        "AsyncResult",
+        lambda _task_id: SimpleNamespace(
+            state="FAILURE", result="Worker exited prematurely"
+        ),
+    )
+
+    reconciled = data_sync_jobs.reconcile_job(job["job_id"])
+
+    assert reconciled["status"] == "failed"
+    assert reconciled["stage"] == "worker_failed"
+    assert reconciled["error"] == "Worker exited prematurely"
+    assert redis.get(data_sync_jobs._active_key("A", "easy_tdx")) is None
