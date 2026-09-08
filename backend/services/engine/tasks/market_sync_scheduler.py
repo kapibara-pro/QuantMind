@@ -115,6 +115,14 @@ def _mark_run(market: str, date_str: str) -> None:
     )
 
 
+def _queue_for_market_sync(market: str, cfg: dict[str, Any]) -> str:
+    if bool(cfg.get("with_qlib")):
+        return os.getenv("QLIB_BUILD_QUEUE", "qlib_build")
+    if market == "A":
+        return os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync")
+    return os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv")
+
+
 def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
     """执行指定市场的同步（按配置的数据集/天数）。"""
     days = int(cfg.get("days") or 5)
@@ -240,7 +248,7 @@ def dispatch_due_syncs() -> dict[str, Any]:
         celery_app.send_task(
             "engine.tasks.run_market_scheduled_sync",
             args=[market, cfg],
-            queue="qlib_backtest_srv",
+            queue=_queue_for_market_sync(market, cfg),
         )
         dispatched.append(market)
         logger.info("[SyncSchedule] %s 到点 %s，已派发同步任务", MARKETS[market], now_hm)

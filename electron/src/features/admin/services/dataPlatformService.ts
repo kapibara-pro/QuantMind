@@ -81,6 +81,7 @@ export interface DataSourceSyncJob {
     with_qlib?: boolean;
     done: number;
     total?: number | null;
+    progress?: number | null;
     current?: string | null;
     result?: Record<string, any> | null;
     error?: string | null;

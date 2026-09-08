@@ -88,12 +88,15 @@ CELERY_WORKER_DISABLE_RATE_LIMITS = os.getenv("CELERY_WORKER_DISABLE_RATE_LIMITS
 CELERY_TASK_ACKS_LATE = os.getenv("CELERY_TASK_ACKS_LATE", "true").lower() == "true"
 CELERY_TASK_REJECT_ON_WORKER_LOST = os.getenv("CELERY_TASK_REJECT_ON_WORKER_LOST", "true").lower() == "true"
 CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "86400"))
+CELERY_VISIBILITY_TIMEOUT = int(os.getenv("CELERY_VISIBILITY_TIMEOUT", "43200"))
 
 CELERY_QUEUE = os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv").strip() or "qlib_backtest_srv"
 CELERY_EXCHANGE = os.getenv("QLIB_CELERY_EXCHANGE", "qlib")
 CELERY_ROUTING_KEY = os.getenv("QLIB_CELERY_ROUTING_KEY", "qlib.backtest")
 QUANTDB_SYNC_QUEUE = os.getenv("QUANTDB_SYNC_QUEUE", "quantdb_sync").strip() or "quantdb_sync"
 QUANTDB_SYNC_EXCHANGE = os.getenv("QUANTDB_SYNC_EXCHANGE", CELERY_EXCHANGE).strip() or CELERY_EXCHANGE
+QLIB_BUILD_QUEUE = os.getenv("QLIB_BUILD_QUEUE", "qlib_build").strip() or "qlib_build"
+QLIB_BUILD_EXCHANGE = os.getenv("QLIB_BUILD_EXCHANGE", CELERY_EXCHANGE).strip() or CELERY_EXCHANGE
 AUTO_INFERENCE_ENABLED = os.getenv("AUTO_INFERENCE_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_ENABLED = os.getenv("NEWS_ENRICH_ENABLED", "true").lower() == "true"
 NEWS_ENRICH_INTERVAL_SEC = int(os.getenv("NEWS_ENRICH_INTERVAL_SEC", "60"))
@@ -103,9 +106,11 @@ NEWS_MATCHER_RELOAD_SEC = int(os.getenv("NEWS_MATCHER_RELOAD_SEC", "600"))
 # 但使用独立 routing_key，从而可以由独立 worker 消费，互不抢占进程。
 _default_exchange = Exchange(CELERY_EXCHANGE, type="direct")
 _quantdb_sync_exchange = Exchange(QUANTDB_SYNC_EXCHANGE, type="direct")
+_qlib_build_exchange = Exchange(QLIB_BUILD_EXCHANGE, type="direct")
 task_queues = (
     Queue(CELERY_QUEUE, exchange=_default_exchange, routing_key=CELERY_ROUTING_KEY),
     Queue(QUANTDB_SYNC_QUEUE, exchange=_quantdb_sync_exchange, routing_key=QUANTDB_SYNC_QUEUE),
+    Queue(QLIB_BUILD_QUEUE, exchange=_qlib_build_exchange, routing_key=QLIB_BUILD_QUEUE),
 )
 
 # Celery配置
@@ -206,6 +211,11 @@ celery_app.conf.update(
     # 结果配置
     result_expires=CELERY_RESULT_EXPIRES,
     result_extended=True,  # 存储扩展结果信息
+    broker_transport_options={"visibility_timeout": CELERY_VISIBILITY_TIMEOUT},
+    result_backend_transport_options={
+        "visibility_timeout": CELERY_VISIBILITY_TIMEOUT
+    },
+    visibility_timeout=CELERY_VISIBILITY_TIMEOUT,
     # 重试配置
     task_acks_late=CELERY_TASK_ACKS_LATE,  # 任务完成后才ack
     task_reject_on_worker_lost=CELERY_TASK_REJECT_ON_WORKER_LOST,
@@ -220,6 +230,8 @@ celery_app.conf.update(
         "qlib_app.tasks.*": {"queue": CELERY_QUEUE},
         # 管理台手动 QuantDB 同步走独立队列，避免与回测/期货等重任务抢 Celery 进程
         "engine.tasks.run_quantdb_console_sync": {"queue": QUANTDB_SYNC_QUEUE},
+        "engine.tasks.run_data_source_sync": {"queue": QUANTDB_SYNC_QUEUE},
+        "engine.tasks.update_qlib_cache": {"queue": QLIB_BUILD_QUEUE},
     },
     imports=(
         "backend.services.engine.qlib_app.tasks",

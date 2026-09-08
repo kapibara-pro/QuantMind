@@ -16,6 +16,32 @@ from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 
 logger = logging.getLogger(__name__)
 
+
+class _TrackedDataSourceSyncTask(celery_app.Task):
+    """Close the user-visible job when Celery reports a worker-level failure."""
+
+    abstract = True
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):  # noqa: ANN001
+        job_id = str(kwargs.get("job_id") or (args[0] if args else "")).strip()
+        if job_id:
+            try:
+                from backend.shared.data_sync_jobs import _now_iso, upsert_job
+
+                upsert_job(
+                    job_id,
+                    status="failed",
+                    stage="worker_failed",
+                    current=None,
+                    error=f"Celery worker 异常退出: {exc}",
+                    finished_at=_now_iso(),
+                )
+            except Exception:  # noqa: BLE001 - preserve Celery's original failure
+                logger.exception(
+                    "[DataSourceSync] failed to finalize lost job %s", job_id
+                )
+        super().on_failure(exc, task_id, args, kwargs, einfo)
+
 # 与 model_management.py 保持一致的锁配置
 _INFERENCE_LOCK_KEY_PREFIX = "qm:lock:inference:daily"
 _INFERENCE_LOCK_TTL_SEC = 1800  # 30 分钟
@@ -1206,7 +1232,11 @@ def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any
 
 @celery_app.task(
     name="engine.tasks.run_data_source_sync",
+    base=_TrackedDataSourceSyncTask,
     max_retries=0,
+    acks_late=True,
+    acks_on_failure_or_timeout=True,
+    reject_on_worker_lost=False,
     time_limit=int(os.getenv("DATA_SOURCE_SYNC_TIME_LIMIT", "21600")),
     soft_time_limit=int(os.getenv("DATA_SOURCE_SYNC_SOFT_TIME_LIMIT", "19800")),
 )
@@ -1350,6 +1380,7 @@ def run_data_source_sync(job_id: str) -> dict[str, Any]:
             job_id,
             status=status,
             stage=status,
+            progress=100 if status == "completed" else None,
             current=None,
             result=result,
             error=failure_error,

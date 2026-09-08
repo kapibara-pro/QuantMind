@@ -226,3 +226,15 @@ def test_run_ashare_easy_tdx_schedule_rejects_incomplete_publish_bundle(
         )
 
     assert sync_calls == []
+
+
+def test_ashare_qlib_schedule_uses_dedicated_builder_queue(monkeypatch):
+    from backend.services.engine.tasks.market_sync_scheduler import (
+        _queue_for_market_sync,
+    )
+
+    monkeypatch.setenv("QLIB_BUILD_QUEUE", "qlib-build-test")
+
+    assert _queue_for_market_sync("A", {"with_qlib": True}) == "qlib-build-test"
+    assert _queue_for_market_sync("US", {"with_qlib": True}) == "qlib-build-test"
+    assert _queue_for_market_sync("A", {"with_qlib": False}) == "quantdb_sync"

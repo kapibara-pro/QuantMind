@@ -403,9 +403,12 @@ export const AShareDataSourcePanel: React.FC<AShareDataSourcePanelProps> = ({ on
 
     const serverRows = serverInfo?.channels?.[channel] || [];
     const source = sources.find((item) => item.source_id === sourceId);
-    const progress = activeJob?.total
-        ? Math.round(((activeJob.done || 0) / activeJob.total) * 100)
-        : 0;
+    const progress = Math.max(0, Math.min(
+        100,
+        activeJob?.progress ?? (activeJob?.total
+            ? Math.round(((activeJob.done || 0) / activeJob.total) * 100)
+            : 0),
+    ));
 
     const serverColumns = useMemo<ColumnsType<EasyTdxServer>>(
         () => [

@@ -258,6 +258,9 @@ services:
       - EASY_TDX_TIMEOUT=${EASY_TDX_TIMEOUT:-10}
       # 管理台手动 QuantDB 同步队列（与回测/定时同步队列隔离）
       - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
+      # Qlib 重建使用专用高内存 worker，避免占用 API/交易/行情容器。
+      - QLIB_BUILD_QUEUE=${QLIB_BUILD_QUEUE:-qlib_build}
+      - CELERY_VISIBILITY_TIMEOUT=${CELERY_VISIBILITY_TIMEOUT:-43200}
       # QuantDB 下载并发（单数据集内文件级并发）
       - QUANTDB_SYNC_WORKERS=${QUANTDB_SYNC_WORKERS:-2}
       # 市场分析快照目录（脚本 compute.py 产出后经 scp 部署到宿主机 ./data/market-analysis）
@@ -458,6 +461,8 @@ services:
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
       # 管理台手动 QuantDB 同步队列（与回测/定时同步队列隔离）
       - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
+      - QLIB_BUILD_QUEUE=${QLIB_BUILD_QUEUE:-qlib_build}
+      - CELERY_VISIBILITY_TIMEOUT=${CELERY_VISIBILITY_TIMEOUT:-43200}
       # QuantDB 下载并发（单数据集内文件级并发）
       - QUANTDB_SYNC_WORKERS=${QUANTDB_SYNC_WORKERS:-2}
 
@@ -579,6 +584,8 @@ services:
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
       # 管理台手动 QuantDB 同步队列
       - QUANTDB_SYNC_QUEUE=${QUANTDB_SYNC_QUEUE:-quantdb_sync}
+      - QLIB_BUILD_QUEUE=${QLIB_BUILD_QUEUE:-qlib_build}
+      - CELERY_VISIBILITY_TIMEOUT=${CELERY_VISIBILITY_TIMEOUT:-43200}
       # QuantDB 下载并发（单数据集内文件级并发）
       - QUANTDB_SYNC_WORKERS=${QUANTDB_SYNC_WORKERS:-2}
 
@@ -611,6 +618,26 @@ services:
     networks:
       - quantmind-net
 
+  # 4a3. Qlib 构建 Worker（easy_tdx/QuantDB 发布到训练链路）
+  # 继承数据同步 worker 的数据库、数据目录和代码挂载，只覆盖资源与队列。
+  celery-qlib-builder:
+    extends:
+      service: celery-quantdb-worker
+    container_name: quantmind-celery-qlib-builder
+    mem_limit: ${QM_QLIB_BUILD_WORKER_MEM_LIMIT:-8g}
+    environment:
+      QLIB_BUILD_QUEUE: ${QLIB_BUILD_QUEUE:-qlib_build}
+      QLIB_DUCKDB_MEMORY_LIMIT: ${QLIB_DUCKDB_MEMORY_LIMIT:-4GB}
+      QLIB_DUCKDB_THREADS: ${QLIB_DUCKDB_THREADS:-2}
+      QLIB_DUCKDB_FETCH_ROWS: ${QLIB_DUCKDB_FETCH_ROWS:-65536}
+      QLIB_PROGRESS_HEARTBEAT_SECONDS: ${QLIB_PROGRESS_HEARTBEAT_SECONDS:-15}
+      QLIB_JOB_STALE_SECONDS: ${QLIB_JOB_STALE_SECONDS:-300}
+      CELERY_VISIBILITY_TIMEOUT: ${CELERY_VISIBILITY_TIMEOUT:-43200}
+    command: >
+      celery -A backend.services.engine.qlib_app.celery_config:celery_app worker
+      -Q ${QLIB_BUILD_QUEUE:-qlib_build} --loglevel=info --concurrency=1
+      --pool=prefork --max-tasks-per-child=1 -n qlib_build@%h
+
   # 4b. Celery beat (定时任务调度: 资讯 enrich / matcher 重载等)
   celery-beat:
     image: quantmind-oss:latest
@@ -637,6 +664,8 @@ services:
       - POSTGRES_DB=${DB_NAME:-quantmind}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - QLIB_BUILD_QUEUE=${QLIB_BUILD_QUEUE:-qlib_build}
+      - CELERY_VISIBILITY_TIMEOUT=${CELERY_VISIBILITY_TIMEOUT:-43200}
       - REDIS_PASSWORD=
       - HUNTLY_BASE_URL=http://quantmind-huntly
       - HUNTLY_USERNAME=${HUNTLY_USERNAME:-changeme}
