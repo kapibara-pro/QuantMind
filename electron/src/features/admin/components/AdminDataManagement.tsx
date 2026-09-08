@@ -2,18 +2,15 @@ import React, { useState } from 'react';
 import { Card, Tabs, Typography, Button, Space, Tag } from 'antd';
 import {
   DatabaseOutlined,
-  GlobalOutlined,
-  ThunderboltOutlined,
   SettingOutlined,
-  StockOutlined,
-  FundOutlined,
   CheckCircleFilled,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { AdminQuantDBPanel } from './AdminQuantDBPanel';
 import { AdminQuantMarketPanel } from './AdminQuantMarketPanel';
+import { AdminThsSnapshotPanel } from './ths/AdminThsSnapshotPanel';
 
-const { Title, Text, Paragraph } = Typography;
+const { Title, Text } = Typography;
 
 export const AdminDataManagement: React.FC = () => {
   const navigate = useNavigate();
@@ -29,6 +26,16 @@ export const AdminDataManagement: React.FC = () => {
         </span>
       ),
       children: <AdminQuantDBPanel />,
+    },
+    {
+      key: 'ths_snapshots',
+      label: (
+        <span className="flex items-center gap-2 font-bold text-sm">
+          <DatabaseOutlined />
+          <span>同花顺快照</span>
+        </span>
+      ),
+      children: <AdminThsSnapshotPanel />,
     },
     {
       key: 'quanthk',

@@ -1224,6 +1224,48 @@ def run_market_scheduled_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any
         return {"market": market, "status": "failed", "error": str(e)}
 
 
+@celery_app.task(
+    bind=True,
+    name="engine.tasks.ths_daily_snapshot",
+    max_retries=2,
+    default_retry_delay=300,
+)
+def ths_daily_snapshot(self: Any) -> dict[str, Any]:
+    """保存同花顺盘后选股、情绪和板块历史快照。"""
+    try:
+        from backend.services.engine.data_platform.ths_snapshots import run_daily_snapshot
+
+        return run_daily_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[THS Snapshot] 盘后快照失败: %s", exc)
+        if "HITHINK_FINANCE_API_KEY 未配置" in str(exc):
+            return {"status": "skipped", "reason": "api_key_missing"}
+        if not getattr(exc, "retryable", True):
+            return {"status": "failed", "reason": "non_retryable", "error": str(exc)}
+        raise self.retry(exc=exc) from exc
+
+
+@celery_app.task(
+    bind=True,
+    name="engine.tasks.ths_auction_snapshot",
+    max_retries=2,
+    default_retry_delay=120,
+)
+def ths_auction_snapshot(self: Any) -> dict[str, Any]:
+    """在集合竞价结束后保存同花顺竞价快照和短线基准。"""
+    try:
+        from backend.services.engine.data_platform.ths_snapshots import run_auction_snapshot
+
+        return run_auction_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[THS Snapshot] 竞价快照失败: %s", exc)
+        if "HITHINK_FINANCE_API_KEY 未配置" in str(exc):
+            return {"status": "skipped", "reason": "api_key_missing"}
+        if not getattr(exc, "retryable", True):
+            return {"status": "failed", "reason": "non_retryable", "error": str(exc)}
+        raise self.retry(exc=exc) from exc
+
+
 @celery_app.task(name="engine.tasks.market_snapshot")
 def run_market_snapshot() -> dict[str, Any]:
     """在服务器容器内计算市场分析快照，写入 QM_MARKET_SNAPSHOT_DIR。
