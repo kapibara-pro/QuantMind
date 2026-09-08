@@ -94,7 +94,8 @@ def _publish_locked(
 
     if progress_cb:
         progress_cb("publish_validating", release_id=release_id)
-    quality = validate_release(source_root)
+    target_latest = _latest_common_partition(target_root, PUBLISH_DATASETS)
+    quality = validate_release(source_root, after_date=target_latest)
     dates = quality["dates"]
     if should_cancel and should_cancel():
         return {"cancelled": True, "release_id": release_id, "quality": quality}
@@ -276,14 +277,36 @@ def _publish_locked(
     return result
 
 
-def validate_release(root: Path | None = None) -> dict[str, Any]:
+def validate_release(
+    root: Path | None = None, *, after_date: str | None = None
+) -> dict[str, Any]:
     root = root or source_data_dir()
-    date_sets = {
+    all_date_sets = {
         dataset: set(_partition_dates(root, dataset)) for dataset in PUBLISH_DATASETS
     }
-    missing = [dataset for dataset, dates in date_sets.items() if not dates]
+    missing = [dataset for dataset, dates in all_date_sets.items() if not dates]
     if missing:
         raise ValueError(f"缺少可发布的 easy_tdx 日线数据集: {', '.join(missing)}")
+
+    date_sets = all_date_sets
+    if after_date:
+        newer_date_sets = {
+            dataset: {date for date in dates if date > after_date}
+            for dataset, dates in all_date_sets.items()
+        }
+        if any(newer_date_sets.values()):
+            date_sets = newer_date_sets
+        elif all(after_date in dates for dates in all_date_sets.values()):
+            # Keep same-day retries available when Qlib or PostgreSQL projection
+            # failed after the canonical parquet partition was already switched.
+            date_sets = {
+                dataset: {after_date} for dataset in PUBLISH_DATASETS
+            }
+        else:
+            raise ValueError(
+                f"没有晚于正式行情 {_format_date(after_date)} 的 easy_tdx "
+                "日线数据，且三套日线不满足同日重试条件"
+            )
 
     common = sorted(set.intersection(*date_sets.values()))
     if not common:
@@ -351,6 +374,11 @@ def validate_release(root: Path | None = None) -> dict[str, Any]:
         "status": "passed",
         "dates": common,
         "latest_date": _format_date(common[-1]),
+        "after_date": _format_date(after_date),
+        "ignored_existing_partitions": sum(
+            len(dates) for dates in all_date_sets.values()
+        )
+        - sum(len(dates) for dates in date_sets.values()),
         "minimum_symbols": minimum_symbols,
         "minimum_coverage": minimum_coverage,
         "partitions": reports,

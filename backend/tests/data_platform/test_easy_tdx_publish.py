@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from datetime import date
-
 import pandas as pd
 import pytest
 
 from backend.services.engine.data_platform import easy_tdx_publish
 
 
-def _shadow_frame(symbol: str, close: float = 10.0) -> pd.DataFrame:
+def _shadow_frame(
+    symbol: str, close: float = 10.0, partition_date: str = "20260907"
+) -> pd.DataFrame:
+    timestamp = pd.Timestamp(partition_date).replace(hour=15)
     return pd.DataFrame(
         [
             {
                 "symbol": symbol,
-                "datetime": pd.Timestamp("2026-09-07 15:00:00"),
-                "trade_date": date(2026, 9, 7),
+                "datetime": timestamp,
+                "trade_date": timestamp.date(),
                 "open": close - 0.2,
                 "high": close + 0.3,
                 "low": close - 0.4,
@@ -28,12 +29,14 @@ def _shadow_frame(symbol: str, close: float = 10.0) -> pd.DataFrame:
     )
 
 
-def _official_frame(symbol: str, close: float = 10.0) -> pd.DataFrame:
+def _official_frame(
+    symbol: str, close: float = 10.0, partition_date: str = "20260907"
+) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "symbol": symbol,
-                "time": pd.Timestamp("2026-09-07 15:00:00"),
+                "time": pd.Timestamp(partition_date).replace(hour=15),
                 "open": close - 0.2,
                 "high": close + 0.3,
                 "low": close - 0.4,
@@ -45,8 +48,16 @@ def _official_frame(symbol: str, close: float = 10.0) -> pd.DataFrame:
     )
 
 
-def _write_partition(root, dataset: str, frame: pd.DataFrame) -> None:
-    path = root / "1_kline_data" / dataset / "dt=20260907" / "data.parquet"
+def _write_partition(
+    root, dataset: str, frame: pd.DataFrame, partition_date: str = "20260907"
+) -> None:
+    path = (
+        root
+        / "1_kline_data"
+        / dataset
+        / f"dt={partition_date}"
+        / "data.parquet"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, index=False)
 
@@ -110,6 +121,63 @@ def test_quality_gate_rejects_sample_sync_below_symbol_threshold(
 
     with pytest.raises(ValueError, match="可能是抽样同步"):
         easy_tdx_publish.validate_release()
+
+
+def test_publish_ignores_old_sample_partitions_before_official_latest(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "easy_tdx"
+    target = tmp_path / "quantdb"
+    latest = pd.concat(
+        [
+            _shadow_frame("SH600036", close=12.0),
+            _shadow_frame("SZ000001", close=8.0),
+        ],
+        ignore_index=True,
+    )
+    for dataset in easy_tdx_publish.PUBLISH_DATASETS:
+        _write_partition(
+            source,
+            dataset,
+            _shadow_frame("SH600036", partition_date="20260824"),
+            "20260824",
+        )
+        _write_partition(source, dataset, latest)
+        _write_partition(
+            target,
+            dataset,
+            _official_frame(
+                "600036.SH", close=10.0, partition_date="20260904"
+            ),
+            "20260904",
+        )
+
+    monkeypatch.setenv("QM_EASY_TDX_DATA_DIR", str(source))
+    monkeypatch.setenv("QM_QUANTDB_DATA_DIR", str(target))
+    monkeypatch.setenv("QM_EASY_TDX_PUBLISH_MIN_SYMBOLS", "2")
+
+    result = easy_tdx_publish.publish(with_pg=False, with_qlib=False)
+
+    assert result["published_date_range"] == {
+        "start": "2026-09-07",
+        "end": "2026-09-07",
+    }
+    assert result["quality"]["after_date"] == "2026-09-04"
+    assert result["quality"]["ignored_existing_partitions"] == 3
+    assert not (
+        target
+        / "1_kline_data"
+        / "daily_unadjusted"
+        / "dt=20260824"
+        / "data.parquet"
+    ).exists()
+    assert (
+        target
+        / "1_kline_data"
+        / "daily_unadjusted"
+        / "dt=20260907"
+        / "data.parquet"
+    ).is_file()
 
 
 def test_quality_gate_rejects_mismatched_symbol_sets(tmp_path, monkeypatch):
