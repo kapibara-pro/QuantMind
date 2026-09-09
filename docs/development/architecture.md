@@ -1,6 +1,6 @@
 # QuantMind 开发架构
 
-本文档是开发者架构索引。用户部署请优先阅读根目录 [README.md](../../README.md) 和 [deploy/README.md](../../deploy/README.md)；API 的实时定义以 FastAPI `/docs` 与路由源码为准。
+本文档是开发者架构索引。需要按步骤熟悉项目时，先阅读 [二次开发指南](二次开发指南.md)。用户部署请优先阅读根目录 [README.md](../../README.md) 和 [deploy/README.md](../../deploy/README.md)；API 的实时定义以 FastAPI `/docs` 与路由源码为准。
 
 ## 架构概览
 

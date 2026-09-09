@@ -32,6 +32,11 @@ DATASETS: dict[str, dict[str, Any]] = {
         "adjust": "hfq",
         "default": False,
     },
+    "index_daily": {
+        "label": "指数日线",
+        "index": True,
+        "default": True,
+    },
     "min5_kline": {
         "label": "5 分钟线（不复权）",
         "freq": "5min",
@@ -47,6 +52,21 @@ DATASETS: dict[str, dict[str, Any]] = {
         "adjust": None,
         "default": True,
     },
+}
+
+# TDX index bars use the same market/code split as stocks but a dedicated
+# protocol command. Keep this list explicit so stock-list refreshes cannot
+# accidentally turn indices into ordinary stock requests.
+INDEX_SYMBOLS: dict[str, str] = {
+    "SH000001": "上证指数",
+    "SZ399001": "深证成指",
+    "SZ399006": "创业板指",
+    "SH000300": "沪深300",
+    "SH000905": "中证500",
+    "SH000852": "中证1000",
+    "SH000016": "上证50",
+    "SH000688": "科创50",
+    "BJ899050": "北证50",
 }
 
 
@@ -202,10 +222,18 @@ def sync(
     daily_datasets = [
         name
         for name in selected
-        if name != "stock_list" and not _is_minute_dataset(name)
+        if name != "stock_list"
+        and not _is_minute_dataset(name)
+        and not DATASETS[name].get("index")
+    ]
+    index_datasets = [
+        name for name in selected if DATASETS[name].get("index")
     ]
     minute_datasets = [name for name in selected if _is_minute_dataset(name)]
-    total = len(universe) * (len(daily_datasets) + len(minute_datasets))
+    total = (
+        len(universe) * (len(daily_datasets) + len(minute_datasets))
+        + len(INDEX_SYMBOLS) * len(index_datasets)
+    )
     if progress_cb:
         progress_cb("start", total=total)
 
@@ -267,6 +295,46 @@ def sync(
             "rows": len(merged),
             "partitions": len(written),
             "failed_symbols": sum(1 for item in errors if item["dataset"] == dataset),
+        }
+
+    for dataset in index_datasets:
+        frames: list[pd.DataFrame] = []
+        errors_before = len(errors)
+        for symbol in INDEX_SYMBOLS:
+            if should_cancel and should_cancel():
+                result["cancelled"] = True
+                result["errors"] = errors[:100]
+                result["error_count"] = len(errors)
+                return result
+            try:
+                frame = adapter.fetch_index_daily(
+                    symbol,
+                    start_date,
+                    date.today(),
+                )
+                frames.append(frame.tail(days))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(
+                    {"dataset": dataset, "symbol": symbol, "error": str(exc)[:300]}
+                )
+            done += 1
+            if progress_cb:
+                progress_cb(
+                    "symbol",
+                    dataset=dataset,
+                    symbol=symbol,
+                    done=done,
+                    total=total,
+                )
+        if progress_cb:
+            progress_cb("write", dataset=dataset)
+        merged = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        written = _write_daily_partitions(root, dataset, merged)
+        result["datasets"][dataset] = {
+            "rows": len(merged),
+            "partitions": len(written),
+            "symbols": int(merged["symbol"].nunique()) if not merged.empty else 0,
+            "failed_symbols": len(errors) - errors_before,
         }
 
     requested_start = date.today() - timedelta(days=max(days * 2 + 10, 20))
@@ -413,7 +481,13 @@ def _remote_update_markers(
 ) -> dict[str, dict[str, Any]]:
     markers: dict[str, dict[str, Any]] = {}
     benchmark_symbols = ("SH600000", "SZ000001")
-    daily_datasets = [name for name in selected if not _is_minute_dataset(name)]
+    daily_datasets = [
+        name
+        for name in selected
+        if name != "stock_list"
+        and not _is_minute_dataset(name)
+        and not DATASETS[name].get("index")
+    ]
     if daily_datasets:
         latest_date: date | None = None
         errors: list[str] = []
@@ -429,6 +503,27 @@ def _remote_update_markers(
         if latest_date is None:
             raise RuntimeError("easy_tdx 日线基准行情不可用: " + "; ".join(errors))
         for dataset in daily_datasets:
+            markers[dataset] = {
+                "trade_date": latest_date,
+                "cursor": latest_date.isoformat(),
+            }
+
+    index_datasets = [name for name in selected if DATASETS[name].get("index")]
+    if index_datasets:
+        latest_date: date | None = None
+        errors: list[str] = []
+        for symbol in INDEX_SYMBOLS:
+            try:
+                frame = adapter.fetch_index_daily(
+                    symbol, today - timedelta(days=20), today
+                )
+                current = pd.to_datetime(frame["trade_date"]).dt.date.max()
+                latest_date = max(latest_date, current) if latest_date else current
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{symbol}: {exc}")
+        if latest_date is None:
+            raise RuntimeError("easy_tdx 指数日线基准行情不可用: " + "; ".join(errors))
+        for dataset in index_datasets:
             markers[dataset] = {
                 "trade_date": latest_date,
                 "cursor": latest_date.isoformat(),

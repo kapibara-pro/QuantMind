@@ -1,4 +1,4 @@
-"""Publish validated easy_tdx daily bars into the canonical A-share data path."""
+"""Publish validated easy_tdx bars into the canonical A-share data path."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ PUBLISH_DATASETS = (
     "daily_forward",
     "daily_backward",
 )
+PUBLISH_INDEX_DATASETS = ("index_daily",)
+PUBLISH_MINUTE_DATASETS = ("min1_kline", "min5_kline")
 _KLINE_COLUMNS = (
     "symbol",
     "time",
@@ -33,6 +35,10 @@ _KLINE_COLUMNS = (
     "amount",
 )
 _KEY_COLUMNS = ("symbol", "time")
+_MINUTE_COLUMNS = _KLINE_COLUMNS
+# QuantDB 的既有指数消费者会读取这两个可选字段。easy_tdx 不一定提供
+# 它们，但正式目录必须保持稳定 schema，避免 DuckDB 视图在全新目录上绑定失败。
+_INDEX_COLUMNS = _KLINE_COLUMNS + ("preClose", "Category")
 
 
 def source_data_dir() -> Path:
@@ -47,11 +53,57 @@ def publication_status() -> dict[str, Any]:
     source_latest = _latest_common_partition(source_data_dir(), PUBLISH_DATASETS)
     target_latest = _latest_common_partition(target_data_dir(), PUBLISH_DATASETS)
     manifest = _read_latest_manifest(source_data_dir())
+    datasets: dict[str, dict[str, Any]] = {}
+    for dataset in (*PUBLISH_DATASETS, *PUBLISH_INDEX_DATASETS):
+        datasets[dataset] = {
+            "source_latest_date": _format_date(
+                _latest_partition(source_data_dir(), dataset)
+            ),
+            "published_latest_date": _format_date(
+                _latest_partition(target_data_dir(), dataset)
+            ),
+        }
+    for dataset in PUBLISH_MINUTE_DATASETS:
+        source = _minute_coverage(source_data_dir(), dataset)
+        target = _minute_coverage(target_data_dir(), dataset)
+        datasets[dataset] = {
+            "source_latest_at": source["latest_at"],
+            "published_latest_at": target["latest_at"],
+            "source_files": source["files"],
+            "published_files": target["files"],
+            "source_failed_symbols": source["failed_symbols"],
+        }
+    index_source_latest = _latest_partition(source_data_dir(), "index_daily")
+    index_target_latest = _latest_partition(target_data_dir(), "index_daily")
+    index_pending = bool(
+        index_source_latest
+        and (not index_target_latest or index_source_latest > index_target_latest)
+    )
+    minute_pending = any(
+        (details.get("source_files") or 0) > (details.get("published_files") or 0)
+        or (
+            details.get("source_latest_at")
+            and details.get("source_latest_at") != details.get("published_latest_at")
+        )
+        for details in datasets.values()
+        if "source_files" in details
+    )
     return {
         "source_latest_date": _format_date(source_latest),
         "published_latest_date": _format_date(target_latest),
+        "source_index_latest_date": _format_date(
+            _latest_partition(source_data_dir(), "index_daily")
+        ),
+        "published_index_latest_date": _format_date(
+            _latest_partition(target_data_dir(), "index_daily")
+        ),
+        "datasets": datasets,
         "last_release": manifest,
-        "publish_available": bool(source_latest and source_latest > (target_latest or "")),
+        "publish_available": bool(
+            (source_latest and source_latest > (target_latest or ""))
+            or index_pending
+            or minute_pending
+        ),
     }
 
 
@@ -62,7 +114,7 @@ def publish(
     progress_cb: Callable[..., None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Validate, merge, and publish the complete daily-bar bundle.
+    """Validate, merge, and publish the complete easy_tdx release bundle.
 
     The shadow directory remains the source of the release. QuantDB-only datasets
     (financials, valuation, and L1/L2 factors) are never modified.
@@ -104,8 +156,18 @@ def _publish_locked(
     staging_root = publish_root / "staging"
     backup_root = publish_root / "backup"
     manifest_path = source_root / "releases" / release_id / "manifest.json"
-    total = len(dates) * len(PUBLISH_DATASETS) + int(with_qlib) + int(with_pg)
+    index_dates = _new_partition_dates(source_root, target_root, "index_daily")
+    minute_files = _minute_source_files(source_root)
+    _validate_minute_release(source_root)
+    total = (
+        len(dates) * len(PUBLISH_DATASETS)
+        + len(index_dates)
+        + len(minute_files)
+        + int(with_qlib)
+        + int(with_pg)
+    )
     done = 0
+    prepared_done = 0
     if progress_cb:
         progress_cb("publish_start", total=total, release_id=release_id)
 
@@ -142,6 +204,103 @@ def _publish_locked(
                     "sha256": _sha256(staged_file),
                 }
             )
+            prepared_done += 1
+            if progress_cb:
+                progress_cb(
+                    "publish_prepare",
+                    done=prepared_done,
+                    total=total,
+                    dataset=dataset,
+                    date=partition_date,
+                )
+
+    for dataset in PUBLISH_INDEX_DATASETS:
+        for partition_date in index_dates:
+            if should_cancel and should_cancel():
+                _remove_tree(publish_root)
+                return {"cancelled": True, "release_id": release_id, "quality": quality}
+            source_file = _partition_file(source_root, dataset, partition_date)
+            target_file = _partition_file(target_root, dataset, partition_date)
+            staged_file = _partition_file(staging_root, dataset, partition_date)
+            source_frame = _normalize_index_partition(source_file, partition_date)
+            target_frame = (
+                _normalize_index_partition(target_file, partition_date)
+                if target_file.is_file()
+                else pd.DataFrame(columns=_INDEX_COLUMNS)
+            )
+            merged = _merge_index_partition(target_frame, source_frame)
+            _write_parquet(merged, staged_file)
+            prepared.append(
+                {
+                    "dataset": dataset,
+                    "date": partition_date,
+                    "source_rows": len(source_frame),
+                    "target_rows_before": len(target_frame),
+                    "target_rows_after": len(merged),
+                    "target_file": target_file,
+                    "staged_file": staged_file,
+                    "sha256": _sha256(staged_file),
+                }
+            )
+            prepared_done += 1
+            if progress_cb:
+                progress_cb(
+                    "publish_prepare",
+                    done=prepared_done,
+                    total=total,
+                    dataset=dataset,
+                    date=partition_date,
+                )
+
+    for dataset, source_file in minute_files:
+        if should_cancel and should_cancel():
+            _remove_tree(publish_root)
+            return {"cancelled": True, "release_id": release_id, "quality": quality}
+        relative = source_file.relative_to(source_root / "1_kline_data" / dataset)
+        target_file = target_root / "1_kline_data" / dataset / f"{_suffix_filename(relative.name)}"
+        staged_file = staging_root / "1_kline_data" / dataset / f"{_suffix_filename(relative.name)}"
+        source_frame = _normalize_minute_file(source_file)
+        target_frame = (
+            _normalize_minute_file(target_file, symbol=target_file.stem)
+            if target_file.is_file()
+            else pd.DataFrame(columns=_MINUTE_COLUMNS)
+        )
+        merged = _merge_minute(target_frame, source_frame)
+        _write_parquet(merged, staged_file)
+        prepared.append(
+            {
+                "dataset": dataset,
+                "date": (
+                    _format_date(
+                        str(merged["time"].dt.date.max()).replace("-", "")
+                    )
+                    if not merged.empty
+                    else None
+                ),
+                "source_rows": len(source_frame),
+                "target_rows_before": len(target_frame),
+                "target_rows_after": len(merged),
+                "target_file": target_file,
+                "staged_file": staged_file,
+                "backup_file_path": (
+                    publish_root
+                    / "backup"
+                    / "1_kline_data"
+                    / dataset
+                    / target_file.name
+                ),
+                "sha256": _sha256(staged_file),
+            }
+        )
+        prepared_done += 1
+        if progress_cb:
+            progress_cb(
+                "publish_prepare",
+                done=prepared_done,
+                total=total,
+                dataset=dataset,
+                current=f"整理 {source_file.name}",
+            )
 
     applied: list[dict[str, Any]] = []
     try:
@@ -156,7 +315,7 @@ def _publish_locked(
                 }
             target_file = item["target_file"]
             staged_file = item["staged_file"]
-            backup_file = _partition_file(
+            backup_file = item.get("backup_file_path") or _partition_file(
                 backup_root, item["dataset"], item["date"]
             )
             target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +399,8 @@ def _publish_locked(
             )
         done += 1
 
+    _write_minute_publish_state(target_root, source_root)
+
     result = {
         "status": "partial" if warnings else "ok",
         "committed": committed,
@@ -254,6 +415,11 @@ def _publish_locked(
             "start": _format_date(dates[0]),
             "end": _format_date(dates[-1]),
         },
+        "published_index_date_range": {
+            "start": _format_date(index_dates[0]) if index_dates else None,
+            "end": _format_date(index_dates[-1]) if index_dates else None,
+        },
+        "published_minute_files": len(minute_files),
         "quality": quality,
         "partitions": [
             {
@@ -456,6 +622,76 @@ def _merge_partition(target: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame
     return payload.loc[:, list(_KLINE_COLUMNS)]
 
 
+def _normalize_index_partition(path: Path, partition_date: str) -> pd.DataFrame:
+    """Normalize an index partition while retaining QuantDB compatibility fields."""
+    frame = pd.read_parquet(path)
+    if "time" not in frame.columns:
+        if "datetime" in frame.columns:
+            frame = frame.rename(columns={"datetime": "time"})
+        elif "trade_date" in frame.columns:
+            frame = frame.rename(columns={"trade_date": "time"})
+    if "preClose" not in frame.columns:
+        for alias in ("pre_close", "preclose", "prev_close"):
+            if alias in frame.columns:
+                frame = frame.rename(columns={alias: "preClose"})
+                break
+    if "preClose" not in frame.columns:
+        frame["preClose"] = pd.NA
+    if "Category" not in frame.columns:
+        for alias in ("category", "category_id"):
+            if alias in frame.columns:
+                frame = frame.rename(columns={alias: "Category"})
+                break
+    if "Category" not in frame.columns:
+        frame["Category"] = pd.NA
+    missing = [column for column in _KLINE_COLUMNS if column not in frame.columns]
+    if missing:
+        raise ValueError(f"指数分区字段缺失 {path}: {', '.join(missing)}")
+    frame = frame.loc[:, list(_INDEX_COLUMNS)].copy()
+    frame["symbol"] = frame["symbol"].map(StockCodeUtil.to_suffix)
+    # 先保留可选字段，再由规范化函数按 symbol+time 排序，确保字段不发生错位。
+    frame = _normalize_values(frame, partition_date)
+    frame["preClose"] = pd.to_numeric(frame["preClose"], errors="coerce")
+    return frame.loc[:, list(_INDEX_COLUMNS)]
+
+
+def _normalize_minute_file(path: Path, *, symbol: str | None = None) -> pd.DataFrame:
+    frame = pd.read_parquet(path)
+    if "time" not in frame.columns and "datetime" in frame.columns:
+        frame = frame.rename(columns={"datetime": "time"})
+    if "amount" not in frame.columns:
+        frame["amount"] = 0.0
+    if "symbol" not in frame.columns:
+        frame["symbol"] = symbol or path.stem
+    missing = [column for column in _MINUTE_COLUMNS if column not in frame.columns]
+    if missing:
+        raise ValueError(f"分钟文件字段缺失 {path}: {', '.join(missing)}")
+    frame = frame.loc[:, list(_MINUTE_COLUMNS)].copy()
+    frame["symbol"] = frame["symbol"].map(StockCodeUtil.to_suffix)
+    frame["time"] = pd.to_datetime(frame["time"], errors="coerce")
+    if frame["time"].isna().any():
+        raise ValueError(f"分钟文件含无效时间: {path}")
+    for column in _MINUTE_COLUMNS[2:]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame.sort_values(list(_KEY_COLUMNS)).reset_index(drop=True)
+
+
+def _merge_minute(target: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
+    payload = pd.concat([target, source], ignore_index=True)
+    payload = payload.drop_duplicates(list(_KEY_COLUMNS), keep="last")
+    return payload.sort_values(list(_KEY_COLUMNS)).reset_index(drop=True).loc[
+        :, list(_MINUTE_COLUMNS)
+    ]
+
+
+def _merge_index_partition(target: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
+    payload = pd.concat([target, source], ignore_index=True)
+    payload = payload.drop_duplicates(list(_KEY_COLUMNS), keep="last")
+    return payload.sort_values(list(_KEY_COLUMNS)).reset_index(drop=True).loc[
+        :, list(_INDEX_COLUMNS)
+    ]
+
+
 def _build_qlib(
     target_root: Path,
     expected_latest: str,
@@ -535,6 +771,100 @@ def _partition_dates(root: Path, dataset: str) -> list[str]:
         and path.name.removeprefix("dt=").isdigit()
         and (path / "data.parquet").is_file()
     )
+
+
+def _latest_partition(root: Path, dataset: str) -> str | None:
+    dates = _partition_dates(root, dataset)
+    return dates[-1] if dates else None
+
+
+def _new_partition_dates(source_root: Path, target_root: Path, dataset: str) -> list[str]:
+    source_dates = set(_partition_dates(source_root, dataset))
+    target_dates = set(_partition_dates(target_root, dataset))
+    if not source_dates:
+        return []
+    newer = source_dates - target_dates
+    if newer:
+        return sorted(newer)
+    latest = max(source_dates)
+    return [latest] if latest in target_dates else []
+
+
+def _minute_source_files(root: Path) -> list[tuple[str, Path]]:
+    result: list[tuple[str, Path]] = []
+    for dataset in PUBLISH_MINUTE_DATASETS:
+        directory = root / "1_kline_data" / dataset
+        if not directory.is_dir():
+            continue
+        result.extend((dataset, path) for path in sorted(directory.glob("*.parquet")))
+    return result
+
+
+def _validate_minute_release(root: Path) -> None:
+    minimum_symbols = int(os.getenv("QM_EASY_TDX_PUBLISH_MIN_SYMBOLS", "3000"))
+    for dataset in PUBLISH_MINUTE_DATASETS:
+        directory = root / "1_kline_data" / dataset
+        files = list(directory.glob("*.parquet")) if directory.is_dir() else []
+        if files and len(files) < minimum_symbols:
+            raise ValueError(
+                f"{dataset} 标的数 {len(files)} 小于发布门槛 {minimum_symbols}，"
+                "可能是抽样同步"
+            )
+
+
+def _suffix_filename(name: str) -> str:
+    stem = Path(name).stem
+    return f"{StockCodeUtil.to_suffix(stem)}.parquet"
+
+
+def _minute_coverage(root: Path, dataset: str) -> dict[str, Any]:
+    directory = root / "1_kline_data" / dataset
+    files = list(directory.glob("*.parquet")) if directory.is_dir() else []
+    state_path = directory / "_sync_state.json"
+    publication_state_path = directory / "_publication_state.json"
+    state: dict[str, Any] = {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        try:
+            state = json.loads(publication_state_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    latest_at = state.get("latest_at") or state.get("checked_through")
+    if not latest_at and files:
+        latest_values: list[pd.Timestamp] = []
+        for path in files[: min(len(files), 20)]:
+            try:
+                columns = pd.read_parquet(path, engine="pyarrow").columns
+                time_column = "datetime" if "datetime" in columns else "time"
+                frame = pd.read_parquet(path, columns=[time_column])
+                latest_values.append(pd.to_datetime(frame[time_column]).max())
+            except Exception:
+                continue
+        if latest_values:
+            latest_at = max(latest_values).isoformat()
+    return {
+        "files": len(files),
+        "latest_at": latest_at,
+        "failed_symbols": int(state.get("failed_symbols") or 0),
+    }
+
+
+def _write_minute_publish_state(target_root: Path, source_root: Path) -> None:
+    for dataset in PUBLISH_MINUTE_DATASETS:
+        source_state = _minute_coverage(source_root, dataset)
+        if not source_state["files"]:
+            continue
+        path = target_root / "1_kline_data" / dataset / "_publication_state.json"
+        _write_json(
+            {
+                "dataset": dataset,
+                "latest_at": source_state["latest_at"],
+                "files": source_state["files"],
+                "published_at": _now_iso(),
+            },
+            path,
+        )
 
 
 def _latest_common_partition(root: Path, datasets: tuple[str, ...]) -> str | None:

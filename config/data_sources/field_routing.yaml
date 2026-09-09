@@ -44,8 +44,8 @@ markets:
       cleanup: true
     index_kline:
       tier: T1
-      primary: quantdb_local
-      fallbacks: []
+      primary: easy_tdx
+      fallbacks: [quantdb_local]
       consensus: false
       cleanup: true
     financial_report:

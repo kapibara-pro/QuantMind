@@ -43,7 +43,18 @@ const REQUIRED_PUBLISH_DATASETS = [
 interface PublicationStatus {
     source_latest_date?: string | null;
     published_latest_date?: string | null;
+    source_index_latest_date?: string | null;
+    published_index_latest_date?: string | null;
     publish_available: boolean;
+    datasets?: Record<string, {
+        source_latest_date?: string | null;
+        published_latest_date?: string | null;
+        source_latest_at?: string | null;
+        published_latest_at?: string | null;
+        source_files?: number;
+        published_files?: number;
+        source_failed_symbols?: number;
+    }>;
     last_release?: {
         release_id?: string;
         published_date_range?: { start: string; end: string };
@@ -508,7 +519,7 @@ export const AShareDataSourcePanel: React.FC<AShareDataSourcePanelProps> = ({ on
                     {sourceId === 'easy_tdx' && (
                         <Popconfirm
                             title="发布到训练链路"
-                            description="将通过质量校验的三套日线合并到正式行情，并更新 Qlib 与 PG。"
+                            description="将通过质量校验的股票日线、指数日线和分钟线写入正式行情，并更新 Qlib 与 PG。"
                             okText="发布"
                             cancelText="取消"
                             onConfirm={publishExisting}
@@ -544,6 +555,18 @@ export const AShareDataSourcePanel: React.FC<AShareDataSourcePanelProps> = ({ on
                     <div className="flex flex-wrap items-center gap-2 mt-3">
                         <Tag>采集区 {publication?.source_latest_date || '暂无数据'}</Tag>
                         <Tag color="blue">正式行情 {publication?.published_latest_date || '未发布'}</Tag>
+                        <Tag>指数采集 {publication?.source_index_latest_date || '暂无数据'}</Tag>
+                        <Tag color="blue">指数正式 {publication?.published_index_latest_date || '未发布'}</Tag>
+                        {(['min5_kline', 'min1_kline'] as const).map((dataset) => {
+                            const detail = publication?.datasets?.[dataset];
+                            const source = detail?.source_latest_at?.slice(0, 16) || '暂无数据';
+                            const published = detail?.published_latest_at?.slice(0, 16) || '未发布';
+                            return (
+                                <Tag key={dataset} color={detail?.published_latest_at ? 'blue' : 'default'}>
+                                    {dataset === 'min5_kline' ? '5分钟' : '1分钟'} 采集 {source} / 正式 {published}
+                                </Tag>
+                            );
+                        })}
                         <Tag color={publication?.last_release?.qlib?.status === 'ok' ? 'green' : 'default'}>
                             Qlib {publication?.last_release?.qlib?.latest_date || '未发布'}
                         </Tag>

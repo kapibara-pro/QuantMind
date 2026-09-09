@@ -100,7 +100,10 @@ class StockTerminalService {
     }
   }
 
-  async getIndexKline(symbol: string, days = 500): Promise<{ date: string; close: number }[]> {
+  async getIndexKline(symbol: string, days = 500): Promise<({ date: string; close: number }[] & {
+    latestTradeDate?: string | null;
+    sourceUsed?: string;
+  })> {
     try {
       const resp = await this.client.get('/market/index-kline', {
         params: { symbol, days },
@@ -108,8 +111,15 @@ class StockTerminalService {
       const data = resp.data?.data ?? {};
       const dates: string[] = data.dates ?? [];
       const closes: number[] = data.close ?? [];
-      return dates.map((d, i) => ({ date: String(d).slice(0, 10), close: Number(closes[i]) }))
+      const items = dates.map((d, i) => ({ date: String(d).slice(0, 10), close: Number(closes[i]) }))
         .filter(x => x.date && Number.isFinite(x.close));
+      const result = items as ({ date: string; close: number }[] & {
+        latestTradeDate?: string | null;
+        sourceUsed?: string;
+      });
+      result.latestTradeDate = data.latest_trade_date ?? (result.at(-1)?.date ?? null);
+      result.sourceUsed = String(data.source_used ?? 'unknown');
+      return result;
     } catch {
       return [];
     }

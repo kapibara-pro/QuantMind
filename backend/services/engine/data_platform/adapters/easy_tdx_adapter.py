@@ -81,7 +81,13 @@ def _minute_request_count(start: date, end: date, freq: str) -> int:
 class EasyTdxAdapter(OfflineDataSourceAdapter):
     name = "easy_tdx"
     markets = ["A"]
-    fields = {"daily_kline", "minute_kline", "realtime_quote", "stock_list"}
+    fields = {
+        "daily_kline",
+        "index_kline",
+        "minute_kline",
+        "realtime_quote",
+        "stock_list",
+    }
     category = "market_data"
     transport = "tcp"
     delivery_modes = {"batch", "realtime_pull"}
@@ -135,6 +141,46 @@ class EasyTdxAdapter(OfflineDataSourceAdapter):
         df = df.loc[mask].reset_index(drop=True)
         if df.empty:
             raise DataUnavailable(f"easy_tdx 指定日期无日线数据: {prefix}")
+        return df
+
+    def fetch_index_daily(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Fetch index daily bars through TDX's index-specific protocol.
+
+        Index responses have a different wire layout from stock bars (they
+        include advance/decline counts), so ``get_stock_kline`` must not be
+        used for index symbols.
+        """
+        self._ensure_available()
+        market, code, prefix = _split_symbol(symbol)
+        try:
+            from easy_tdx import KlineCategory
+
+            raw = self._manager.execute(
+                "standard",
+                lambda client: client.get_index_bars(
+                    market,
+                    code,
+                    KlineCategory.DAY,
+                    start=0,
+                    count=800,
+                ),
+            )
+        except Exception as exc:
+            raise DataUnavailable(f"easy_tdx 指数日线拉取失败: {prefix}: {exc}") from exc
+        df = _standardize_bars(raw, prefix, self.name)
+        if df.empty:
+            raise DataUnavailable(f"easy_tdx 无指数日线数据: {prefix}")
+        mask = (pd.to_datetime(df["trade_date"]).dt.date >= start) & (
+            pd.to_datetime(df["trade_date"]).dt.date <= end
+        )
+        df = df.loc[mask].reset_index(drop=True)
+        if df.empty:
+            raise DataUnavailable(f"easy_tdx 指定日期无指数日线数据: {prefix}")
         return df
 
     def fetch_minute(
@@ -252,6 +298,8 @@ class EasyTdxAdapter(OfflineDataSourceAdapter):
             return self.fetch_daily(
                 symbol, start, end, adjust=str(kwargs.get("adjust", "qfq"))
             )
+        if field == "index_kline" and start and end:
+            return self.fetch_index_daily(symbol, start, end)
         if field == "minute_kline" and start and end:
             return self.fetch_minute(
                 symbol, start, end, freq=str(kwargs.get("freq", "1min"))

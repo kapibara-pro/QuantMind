@@ -99,6 +99,37 @@ def test_publish_converts_schema_and_source_wins_without_dropping_fallback(
     assert easy_tdx_publish.publication_status()["publish_available"] is False
 
 
+def test_publish_adds_index_and_minute_bars_to_canonical_data(tmp_path, monkeypatch):
+    source = tmp_path / "easy_tdx"
+    target = tmp_path / "quantdb"
+    for dataset in easy_tdx_publish.PUBLISH_DATASETS:
+        _write_partition(source, dataset, _shadow_frame("SH600036"))
+    _write_partition(source, "index_daily", _shadow_frame("SH000001"))
+    for dataset in easy_tdx_publish.PUBLISH_MINUTE_DATASETS:
+        minute_dir = source / "1_kline_data" / dataset
+        minute_dir.mkdir(parents=True, exist_ok=True)
+        _shadow_frame("SH600036").to_parquet(
+            minute_dir / "SH600036.parquet", index=False
+        )
+
+    monkeypatch.setenv("QM_EASY_TDX_DATA_DIR", str(source))
+    monkeypatch.setenv("QM_QUANTDB_DATA_DIR", str(target))
+    monkeypatch.setenv("QM_EASY_TDX_PUBLISH_MIN_SYMBOLS", "1")
+
+    result = easy_tdx_publish.publish(with_pg=False, with_qlib=False)
+
+    index_file = target / "1_kline_data/index_daily/dt=20260907/data.parquet"
+    assert index_file.is_file()
+    assert pd.read_parquet(index_file).iloc[0]["symbol"] == "000001.SH"
+    for dataset in easy_tdx_publish.PUBLISH_MINUTE_DATASETS:
+        minute_file = target / f"1_kline_data/{dataset}/600036.SH.parquet"
+        assert minute_file.is_file()
+        assert pd.read_parquet(minute_file).iloc[0]["symbol"] == "600036.SH"
+    assert result["published_index_date_range"]["end"] == "2026-09-07"
+    assert result["published_minute_files"] == 2
+
+
+
 def test_quality_gate_rejects_incomplete_daily_bundle(tmp_path, monkeypatch):
     source = tmp_path / "easy_tdx"
     for dataset in ("daily_unadjusted", "daily_forward"):

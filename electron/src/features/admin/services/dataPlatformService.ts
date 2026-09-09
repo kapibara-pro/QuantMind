@@ -65,6 +65,8 @@ export interface DataSourceDataset {
     synced?: boolean;
     end_date?: string | null;
     partitions?: number;
+    index?: boolean;
+    freq?: string;
 }
 
 export interface DataSourceSyncJob {
@@ -498,7 +500,18 @@ class DataPlatformService {
         publication?: {
             source_latest_date?: string | null;
             published_latest_date?: string | null;
+            source_index_latest_date?: string | null;
+            published_index_latest_date?: string | null;
             publish_available: boolean;
+            datasets?: Record<string, {
+                source_latest_date?: string | null;
+                published_latest_date?: string | null;
+                source_latest_at?: string | null;
+                published_latest_at?: string | null;
+                source_files?: number;
+                published_files?: number;
+                source_failed_symbols?: number;
+            }>;
             last_release?: {
                 release_id?: string;
                 finished_at?: string;

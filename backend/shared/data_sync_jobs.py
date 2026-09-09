@@ -325,6 +325,18 @@ def progress_callback(job_id: str):
                 progress=0,
                 current="质量校验通过，准备正式分区",
             )
+        elif event == "publish_prepare":
+            done = data.get("done", 0)
+            total = data.get("total") or 0
+            upsert_job(
+                job_id,
+                stage="publish_prepare",
+                done=done,
+                total=total,
+                progress=round(100 * done / total) if total else 0,
+                current=data.get("current")
+                or f"整理 {data.get('dataset')} / {data.get('date')}",
+            )
         elif event == "publish_partition":
             done = data.get("done", 0)
             total = data.get("total") or 0

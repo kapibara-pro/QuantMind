@@ -64,6 +64,7 @@ SOURCE_CATALOG: dict[str, SourceDescriptor] = {
         delivery_modes=("batch", "realtime_pull"),
         capabilities=(
             "daily_kline",
+            "index_kline",
             "minute_kline",
             "realtime_quote",
             "stock_list",
@@ -72,12 +73,13 @@ SOURCE_CATALOG: dict[str, SourceDescriptor] = {
             "daily_unadjusted",
             "daily_forward",
             "daily_backward",
+            "index_daily",
             "min5_kline",
             "min1_kline",
             "stock_list",
         ),
         managed_service=True,
-        notes="A 股行情采集源；通过质量门禁后可发布到正式行情与 Qlib，不提供财务、估值及 L1/L2 因子",
+        notes="A 股股票/指数行情采集源；通过质量门禁后可发布到正式行情与 Qlib，不提供财务、估值及 L1/L2 因子",
     ),
 }
 

@@ -29,6 +29,7 @@ def test_source_catalog_exposes_easy_tdx_when_dependency_is_missing():
     assert "realtime_pull" in sources["easy_tdx"]["delivery_modes"]
     assert "min5_kline" in sources["easy_tdx"]["datasets"]
     assert "min1_kline" in sources["easy_tdx"]["datasets"]
+    assert "index_daily" in sources["easy_tdx"]["datasets"]
     assert get_source_descriptor("easy_tdx").adapter_name == "easy_tdx"
 
 
@@ -147,6 +148,27 @@ class _FakeAdapter:
             ]
         )
 
+    def fetch_index_daily(
+        self, symbol: str, start: date, end: date
+    ) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "datetime": pd.Timestamp("2026-09-03"),
+                    "trade_date": date(2026, 9, 3),
+                    "open": 3000.0,
+                    "high": 3010.0,
+                    "low": 2990.0,
+                    "close": 3005.0,
+                    "volume": 1000,
+                    "amount": 10500,
+                    "adj_factor": 1.0,
+                    "source": "easy_tdx",
+                }
+            ]
+        )
+
 
 def test_easy_tdx_sync_writes_only_source_specific_shadow_partitions(
     tmp_path, monkeypatch
@@ -249,6 +271,65 @@ def test_easy_tdx_minute_fetch_preserves_tdx_close_timestamp(monkeypatch):
 
     assert captured["bar_time"] == "start"
     assert frame.iloc[-1]["datetime"].strftime("%H:%M") == "15:00"
+
+
+def test_easy_tdx_index_fetch_uses_standard_index_protocol(monkeypatch):
+    from backend.services.engine.data_platform.adapters import easy_tdx_adapter
+
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def get_index_bars(self, market, code, category, **kwargs):
+            captured.update({"market": market, "code": code, "category": category})
+            return pd.DataFrame(
+                [
+                    {
+                        "datetime": pd.Timestamp.combine(
+                            date.today(), pd.Timestamp("15:00").time()
+                        ),
+                        "open": 3000.0,
+                        "high": 3010.0,
+                        "low": 2990.0,
+                        "close": 3005.0,
+                        "vol": 1000,
+                        "amount": 10500,
+                    }
+                ]
+            )
+
+    class _Manager:
+        def execute(self, channel, operation):
+            captured["channel"] = channel
+            return operation(_Client())
+
+    monkeypatch.setattr(easy_tdx_adapter, "EASY_TDX_AVAILABLE", True)
+    adapter = EasyTdxAdapter()
+    adapter._manager = _Manager()
+
+    frame = adapter.fetch_index_daily("SH000001", date.today(), date.today())
+
+    assert captured["channel"] == "standard"
+    assert captured["market"] == 1
+    assert captured["code"] == "000001"
+    assert frame.iloc[-1]["symbol"] == "SH000001"
+
+
+def test_easy_tdx_sync_writes_index_daily_partition(tmp_path, monkeypatch):
+    from backend.services.engine.data_platform import easy_tdx_sync
+
+    root = tmp_path / "easy_tdx"
+    monkeypatch.setenv("QM_EASY_TDX_DATA_DIR", str(root))
+    monkeypatch.setattr(easy_tdx_sync, "EasyTdxAdapter", _FakeAdapter)
+
+    result = easy_tdx_sync.sync(datasets=["index_daily"], days=5)
+    path = root / "1_kline_data" / "index_daily" / "dt=20260903" / "data.parquet"
+    frame = pd.read_parquet(path)
+
+    assert path.is_file()
+    assert set(frame["symbol"]) == set(easy_tdx_sync.INDEX_SYMBOLS)
+    assert result["datasets"]["index_daily"]["symbols"] == len(
+        easy_tdx_sync.INDEX_SYMBOLS
+    )
 
 
 def test_easy_tdx_sync_writes_min1_and_min5_symbol_files(tmp_path, monkeypatch):

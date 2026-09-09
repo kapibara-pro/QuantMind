@@ -47,8 +47,25 @@ _KLINE_CACHE_TTL = int(__import__("os").getenv("KLINE_CACHE_TTL_SECONDS", "300")
 _KLINE_CACHE_MAX = 2048
 
 
-def _kline_cache_key(market: str, symbol: str, start: str, end: str, adjust: str) -> str:
-    return f"{market}:{symbol}:{adjust}:{start}:{end}"
+def _kline_data_version() -> str:
+    """Return a cheap filesystem version so a publish invalidates old cache entries."""
+    try:
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        root = QuantDBDataHub.get_instance().data_dir / "1_kline_data" / "daily_forward"
+        partitions = sorted(root.glob("dt=*/data.parquet"))
+        if not partitions:
+            return "none"
+        latest = partitions[-1]
+        return f"{latest.parent.name}:{latest.stat().st_mtime_ns}"
+    except (OSError, RuntimeError):
+        return "unknown"
+
+
+def _kline_cache_key(
+    market: str, symbol: str, start: str, end: str, adjust: str, version: str
+) -> str:
+    return f"{market}:{symbol}:{adjust}:{start}:{end}:{version}"
 
 
 def _kline_cache_get(key: str) -> list[dict[str, Any]] | None:
@@ -304,7 +321,14 @@ async def get_kline(
 
     # 历史行情静态不变：命中内存缓存直接返回（冷读 2s+ → 缓存命中 <5ms）
     # 缓存键含复权方式，不同口径互不污染；A 股外市场忽略 adjust（yahoo 等源不提供复权）
-    cache_key = _kline_cache_key(m, sym, sd.isoformat(), ed.isoformat(), adj if m == "A" else "raw")
+    cache_key = _kline_cache_key(
+        m,
+        sym,
+        sd.isoformat(),
+        ed.isoformat(),
+        adj if m == "A" else "raw",
+        _kline_data_version() if m == "A" else "static",
+    )
     cached = _kline_cache_get(cache_key)
     if cached is not None:
         return {
@@ -420,7 +444,14 @@ async def get_index_kline(
         start = end - timedelta(days=int(days * 1.6))
         df = hub.fetch_index_kline(symbol, start, end)
         if df is None or df.empty:
-            return {"success": True, "data": {"dates": [], "close": [], "ma20": [], "below_ma20": None, "source_used": "none"}}
+            return {
+                "success": True,
+                "data": {
+                    "dates": [], "close": [], "ma20": [],
+                    "below_ma20": None, "latest_trade_date": None,
+                    "source_used": "none",
+                },
+            }
         df = df.sort_values("trade_date").tail(days).reset_index(drop=True)
         closes = df["close"].astype(float).tolist()
         dates = [str(x)[:10] for x in df["trade_date"].tolist()]
@@ -444,12 +475,20 @@ async def get_index_kline(
                 "below_ma20": below_ma20,
                 "latest_close": round(latest, 2) if latest is not None else None,
                 "latest_ma20": ma20_latest,
+                "latest_trade_date": dates[-1] if dates else None,
                 "source_used": "quantdb_index_daily",
             },
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("index kline failed: %s", exc)
-        return {"success": True, "data": {"dates": [], "close": [], "ma20": [], "below_ma20": None, "source_used": "none", "error": str(exc)}}
+        return {
+            "success": True,
+            "data": {
+                "dates": [], "close": [], "ma20": [],
+                "below_ma20": None, "latest_trade_date": None,
+                "source_used": "none", "error": str(exc),
+            },
+        }
 
 
 @router.get("/index-ma")
@@ -494,6 +533,7 @@ async def get_index_ma(
                 "symbol": symbol,
                 "name": "上证指数" if symbol == "000001.SH" else symbol,
                 "trade_date": dates[-1],
+                "latest_trade_date": dates[-1],
                 "close": close,
                 "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma30": ma30, "ma60": ma60,
                 "above_ma20": above,
@@ -508,7 +548,7 @@ async def get_index_ma(
 
 # 指数快照缓存：hub 的 DuckDB 连接是 thread-local，新请求线程需重新挂载视图（~2.6s）。
 # 指数行情为日频本地数据，短 TTL 快照缓存即可让后续请求毫秒级返回。
-_QUOTES_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_QUOTES_CACHE: dict[str, tuple[float, str, list[dict[str, Any]]]] = {}
 _QUOTES_TTL = 60.0
 
 
@@ -527,9 +567,14 @@ async def get_index_quotes(
     market_upper = str(market or "CN").upper()
     metas = _MARKET_INDEX_META.get(market_upper, _MARKET_INDEX_META["CN"])
 
+    data_version = _kline_data_version() if market_upper == "CN" else "static"
     cached = None if asof else _QUOTES_CACHE.get(market_upper)
-    if cached is not None and time.monotonic() - cached[0] < _QUOTES_TTL:
-        quotes = cached[1]
+    if (
+        cached is not None
+        and cached[1] == data_version
+        and time.monotonic() - cached[0] < _QUOTES_TTL
+    ):
+        quotes = cached[2]
     else:
         quotes = []
         for meta in metas:
@@ -537,7 +582,7 @@ async def get_index_quotes(
             if q is not None:
                 quotes.append(q)
         if not asof:
-            _QUOTES_CACHE[market_upper] = (time.monotonic(), quotes)
+            _QUOTES_CACHE[market_upper] = (time.monotonic(), data_version, quotes)
 
     if not quotes:
         return {"success": False, "data": {"market": market_upper, "quotes": []}, "error": f"market {market_upper} 无可用行情数据"}

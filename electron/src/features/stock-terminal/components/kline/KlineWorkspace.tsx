@@ -79,7 +79,7 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
   const [searchText, setSearchText] = useState('');
   const [searchOptions, setSearchOptions] = useState<{ value: string; label: React.ReactNode }[]>([]);
   // 大盘状态（上证指数 vs MA20）
-  const [indexStatus, setIndexStatus] = useState<{ latestClose: number; ma20: number | null; below: boolean } | null>(null);
+  const [indexStatus, setIndexStatus] = useState<{ latestClose: number; ma20: number | null; below: boolean; latestTradeDate: string | null; sourceUsed: string } | null>(null);
   // 当前排名（按最近推理日 + 所选模型在全市场中的分数排名）
   const [scoreRank, setScoreRank] = useState<number | null>(null);
 
@@ -103,7 +103,13 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
       const last20 = arr.slice(-20);
       const ma20 = last20.reduce((a, b) => a + b, 0) / last20.length;
       const latestClose = arr[arr.length - 1];
-      setIndexStatus({ latestClose: Number(latestClose.toFixed(2)), ma20: Number(ma20.toFixed(2)), below: latestClose < ma20 });
+      setIndexStatus({
+        latestClose: Number(latestClose.toFixed(2)),
+        ma20: Number(ma20.toFixed(2)),
+        below: latestClose < ma20,
+        latestTradeDate: closes.latestTradeDate ?? closes.at(-1)?.date ?? null,
+        sourceUsed: closes.sourceUsed ?? 'unknown',
+      });
     }).catch(() => { /* ignore */ });
     return () => { cancelled = true; };
   }, []);
@@ -605,7 +611,9 @@ export function KlineWorkspace({ stock, profile, height = 460, onSelectStock }: 
               <span className={indexStatus.below ? 'text-emerald-600 font-bold' : 'text-rose-600 font-bold'}>
                 {indexStatus.below ? '📉 大盘空' : '📈 大盘多'}
               </span>
-              <span className="text-slate-500 font-mono">上证{indexStatus.latestClose} / MA20 {indexStatus.ma20}</span>
+              <span className="text-slate-500 font-mono">
+                上证{indexStatus.latestClose} / MA20 {indexStatus.ma20} · {indexStatus.latestTradeDate ?? '未知日期'} · {indexStatus.sourceUsed}
+              </span>
             </>
           )}
           {strategyAlerts.length > 0 && (
