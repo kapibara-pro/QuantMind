@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -127,6 +129,11 @@ def test_publish_adds_index_and_minute_bars_to_canonical_data(tmp_path, monkeypa
         assert pd.read_parquet(minute_file).iloc[0]["symbol"] == "600036.SH"
     assert result["published_index_date_range"]["end"] == "2026-09-07"
     assert result["published_minute_files"] == 2
+    # The result is persisted in Redis by the worker and must be JSON-safe.
+    json.dumps(result, ensure_ascii=False)
+    assert all(
+        "backup_file_path" not in partition for partition in result["partitions"]
+    )
 
 
 

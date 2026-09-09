@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 KEY_PREFIX = "quantmind:data_sync:job:"
@@ -36,7 +37,27 @@ def _redis():
 
 
 def _encode(value: Any) -> str:
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return value if isinstance(value, str) else json.dumps(
+        value,
+        ensure_ascii=False,
+        default=_json_default,
+    )
+
+
+def _json_default(value: Any) -> str | list[Any]:
+    """Encode metadata values that commonly appear in worker results.
+
+    Worker results may contain filesystem paths or timestamps from third-party
+    libraries. These are status metadata, so preserving their readable value is
+    preferable to failing the entire job finalization step.
+    """
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, set):
+        return list(value)
+    return str(value)
 
 
 def _decode_text(value: Any) -> str:

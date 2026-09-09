@@ -425,7 +425,12 @@ def _publish_locked(
             {
                 key: value
                 for key, value in item.items()
-                if key not in {"target_file", "staged_file", "backup_file"}
+                if key not in {
+                    "target_file",
+                    "staged_file",
+                    "backup_file",
+                    "backup_file_path",
+                }
             }
             for item in prepared
         ],

@@ -2,10 +2,24 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+
+
+def test_sync_job_encoding_accepts_paths_and_dates():
+    from backend.shared import data_sync_jobs
+
+    encoded = data_sync_jobs._encode(
+        {"path": Path("/tmp/release/manifest.json"), "date": datetime(2026, 9, 9)}
+    )
+
+    assert json.loads(encoded) == {
+        "path": "/tmp/release/manifest.json",
+        "date": "2026-09-09T00:00:00",
+    }
 
 
 @pytest.mark.asyncio
@@ -317,6 +331,24 @@ class _JobRedis:
     def keys(self, prefix: str):
         start = prefix.removesuffix("*")
         return [key for key in self.hashes if key.startswith(start)]
+
+
+def test_upsert_job_persists_path_values_in_result(monkeypatch: pytest.MonkeyPatch):
+    from backend.shared import data_sync_jobs
+
+    redis = _JobRedis()
+    monkeypatch.setattr(data_sync_jobs, "_redis", lambda: redis)
+
+    data_sync_jobs.upsert_job(
+        "sync-publish-result",
+        status="completed",
+        result={"manifest": Path("/data/easy_tdx/releases/manifest.json")},
+    )
+
+    stored = json.loads(
+        redis.hashes[data_sync_jobs.KEY_PREFIX + "sync-publish-result"]["result"]
+    )
+    assert stored["manifest"] == "/data/easy_tdx/releases/manifest.json"
 
 
 def test_same_source_job_lock_is_released_after_terminal_status(
