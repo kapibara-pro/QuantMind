@@ -273,14 +273,14 @@ def test_easy_tdx_minute_fetch_preserves_tdx_close_timestamp(monkeypatch):
     assert frame.iloc[-1]["datetime"].strftime("%H:%M") == "15:00"
 
 
-def test_easy_tdx_index_fetch_uses_standard_index_protocol(monkeypatch):
+def test_easy_tdx_index_fetch_uses_mac_stock_protocol(monkeypatch):
     from backend.services.engine.data_platform.adapters import easy_tdx_adapter
 
     captured: dict[str, object] = {}
 
     class _Client:
-        def get_index_bars(self, market, code, category, **kwargs):
-            captured.update({"market": market, "code": code, "category": category})
+        def get_stock_kline(self, market, code, **kwargs):
+            captured.update({"market": market, "code": code, **kwargs})
             return pd.DataFrame(
                 [
                     {
@@ -308,9 +308,51 @@ def test_easy_tdx_index_fetch_uses_standard_index_protocol(monkeypatch):
 
     frame = adapter.fetch_index_daily("SH000001", date.today(), date.today())
 
-    assert captured["channel"] == "standard"
+    assert captured["channel"] == "mac"
     assert captured["market"] == 1
     assert captured["code"] == "000001"
+    assert captured["adjust"].name == "NONE"
+    assert frame.iloc[-1]["symbol"] == "SH000001"
+
+
+def test_easy_tdx_index_fetch_falls_back_to_standard_protocol(monkeypatch):
+    from backend.services.engine.data_platform.adapters import easy_tdx_adapter
+
+    channels: list[str] = []
+
+    class _Client:
+        def get_stock_kline(self, *args, **kwargs):
+            raise RuntimeError("mac unavailable")
+
+        def get_index_bars(self, market, code, category, **kwargs):
+            return pd.DataFrame(
+                [
+                    {
+                        "datetime": pd.Timestamp.combine(
+                            date.today(), pd.Timestamp("15:00").time()
+                        ),
+                        "open": 3000.0,
+                        "high": 3010.0,
+                        "low": 2990.0,
+                        "close": 3005.0,
+                        "vol": 1000,
+                        "amount": 10500,
+                    }
+                ]
+            )
+
+    class _Manager:
+        def execute(self, channel, operation):
+            channels.append(channel)
+            return operation(_Client())
+
+    monkeypatch.setattr(easy_tdx_adapter, "EASY_TDX_AVAILABLE", True)
+    adapter = EasyTdxAdapter()
+    adapter._manager = _Manager()
+
+    frame = adapter.fetch_index_daily("SH000001", date.today(), date.today())
+
+    assert channels == ["mac", "standard"]
     assert frame.iloc[-1]["symbol"] == "SH000001"
 
 

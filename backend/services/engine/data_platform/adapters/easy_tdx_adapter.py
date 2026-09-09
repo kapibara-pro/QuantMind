@@ -149,14 +149,47 @@ class EasyTdxAdapter(OfflineDataSourceAdapter):
         start: date,
         end: date,
     ) -> pd.DataFrame:
-        """Fetch index daily bars through TDX's index-specific protocol.
+        """Fetch index daily bars, preferring the reliable mac stock endpoint.
 
-        Index responses have a different wire layout from stock bars (they
-        include advance/decline counts), so ``get_stock_kline`` must not be
-        used for index symbols.
+        Some standard TDX nodes advertise index bars but return a truncated
+        payload that ``get_index_bars`` cannot decode. The mac endpoint returns
+        the same OHLCV fields for index codes and is therefore the primary
+        path; retain the dedicated index endpoint as a compatibility fallback.
         """
         self._ensure_available()
         market, code, prefix = _split_symbol(symbol)
+        errors: list[str] = []
+
+        def _normalize_and_filter(raw: pd.DataFrame, channel: str) -> pd.DataFrame:
+            frame = _standardize_bars(raw, prefix, self.name)
+            if frame.empty:
+                raise DataUnavailable(f"{channel} 返回空指数日线")
+            mask = (pd.to_datetime(frame["trade_date"]).dt.date >= start) & (
+                pd.to_datetime(frame["trade_date"]).dt.date <= end
+            )
+            frame = frame.loc[mask].reset_index(drop=True)
+            if frame.empty:
+                raise DataUnavailable(f"{channel} 指定日期无指数日线")
+            return frame
+
+        try:
+            from easy_tdx import Adjust, Period
+
+            raw = self._manager.execute(
+                "mac",
+                lambda client: client.get_stock_kline(
+                    market,
+                    code,
+                    period=Period.DAILY,
+                    start=0,
+                    count=800,
+                    adjust=Adjust.NONE,
+                ),
+            )
+            return _normalize_and_filter(raw, "easy_tdx mac 指数日线")
+        except Exception as exc:  # noqa: BLE001 - try the standard fallback
+            errors.append(f"mac: {exc}")
+
         try:
             from easy_tdx import KlineCategory
 
@@ -170,18 +203,12 @@ class EasyTdxAdapter(OfflineDataSourceAdapter):
                     count=800,
                 ),
             )
-        except Exception as exc:
-            raise DataUnavailable(f"easy_tdx 指数日线拉取失败: {prefix}: {exc}") from exc
-        df = _standardize_bars(raw, prefix, self.name)
-        if df.empty:
-            raise DataUnavailable(f"easy_tdx 无指数日线数据: {prefix}")
-        mask = (pd.to_datetime(df["trade_date"]).dt.date >= start) & (
-            pd.to_datetime(df["trade_date"]).dt.date <= end
-        )
-        df = df.loc[mask].reset_index(drop=True)
-        if df.empty:
-            raise DataUnavailable(f"easy_tdx 指定日期无指数日线数据: {prefix}")
-        return df
+            return _normalize_and_filter(raw, "easy_tdx standard 指数日线")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"standard: {exc}")
+            raise DataUnavailable(
+                f"easy_tdx 指数日线拉取失败: {prefix}: {'; '.join(errors)}"
+            ) from exc
 
     def fetch_minute(
         self,
