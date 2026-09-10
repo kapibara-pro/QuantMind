@@ -11,6 +11,11 @@ DEFAULT_DEV_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3001",
     "http://localhost:3001",
+    # Vite 开发/预览服务器：Web 版前端可用「服务器设置」指向远端后端联调
+    "http://127.0.0.1:4173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4174",
+    "http://localhost:4174",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
 ]

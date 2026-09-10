@@ -20,7 +20,14 @@ import { setUser } from '../store/authSlice';
 import { PageLoading } from './LoadingStates';
 import type { LoginCredentials } from '../types/auth.types';
 import { preloadAiIdeResources } from '../utils/lazyLoad';
-import { isElectronEnv, initDynamicServerUrl, setDynamicServerUrl, getDynamicServerUrl } from '../../../config/services';
+import {
+  isElectronEnv,
+  isServerReachable,
+  normalizeServerUrl,
+  initDynamicServerUrl,
+  setDynamicServerUrl,
+  getDynamicServerUrl,
+} from '../../../config/services';
 import HelpCenterLink from '../../../components/common/HelpCenterLink';
 
 const { Title, Text } = Typography;
@@ -59,6 +66,8 @@ const LoginPage: React.FC = () => {
   const [serverIp, setServerIp] = useState('');
   const [configLoading, setConfigLoading] = useState(false);
   const [showTip, setShowTip] = useState(false);
+  // Web 浏览器下当前站点没有可用后端时的提示（引导用户设置服务器地址）
+  const [showBackendHint, setShowBackendHint] = useState(false);
   const hasCheckedConfig = useRef(false);
 
   // 检测移动端
@@ -73,31 +82,33 @@ const LoginPage: React.FC = () => {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  // Electron 环境检测和服务器配置初始化
+  // 运行环境检测和服务器配置初始化（桌面端与 Web 通用）
   useEffect(() => {
     const checkEnv = async () => {
       const isElectronApp = isElectronEnv();
       setIsElectron(isElectronApp);
 
-      if (isElectronApp) {
-        await initDynamicServerUrl();
-        const savedUrl = getDynamicServerUrl();
-        if (savedUrl) {
-          // 提取 IP 部分（去掉 http:// 和端口）
-          try {
-            const url = new URL(savedUrl);
-            setServerIp(url.hostname);
-          } catch {
-            setServerIp(savedUrl.replace(/^https?:\/\//, '').split(':')[0]);
-          }
-        }
+      await initDynamicServerUrl();
+      const savedUrl = getDynamicServerUrl();
+      if (savedUrl) {
+        setServerIp(savedUrl);
+      }
 
-        // 首次打开且未配置时显示提示
-        if (!hasCheckedConfig.current && !savedUrl) {
-          hasCheckedConfig.current = true;
-          setShowTip(true);
-          // 2秒后折叠提示
-          setTimeout(() => setShowTip(false), 2000);
+      // 桌面端首次打开且未配置时显示提示
+      if (isElectronApp && !hasCheckedConfig.current && !savedUrl) {
+        hasCheckedConfig.current = true;
+        setShowTip(true);
+        // 2秒后折叠提示
+        setTimeout(() => setShowTip(false), 2000);
+      }
+
+      // Web 浏览器且未自定义地址：当前站点探测不到后端时提示去右上角设置
+      if (!isElectronApp && !savedUrl) {
+        try {
+          const res = await fetch('/health', { cache: 'no-store' });
+          setShowBackendHint(!res.ok);
+        } catch {
+          setShowBackendHint(true);
         }
       }
     };
@@ -247,20 +258,18 @@ const LoginPage: React.FC = () => {
 
   // 保存服务器配置
   const handleSaveServerConfig = async () => {
-    const ip = serverIp.trim();
-    if (!ip) {
-      message.warning('请输入服务器 IP 地址');
+    const raw = serverIp.trim();
+    if (!raw) {
+      message.warning('请输入服务器地址');
       return;
     }
 
-    // 简单验证 IP 格式（支持 IP 或域名）
-    const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$|^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$/;
-    if (!ipPattern.test(ip)) {
-      message.warning('请输入有效的 IP 地址或域名');
+    // 支持 host、host:port、http(s)://host:port，以及带 /api/v1 的地址
+    const fullUrl = normalizeServerUrl(raw);
+    if (!fullUrl) {
+      message.warning('请输入有效的服务器地址，例如 38.76.181.214:3000 或 http://192.168.1.100:8000');
       return;
     }
-
-    const fullUrl = `http://${ip}:8000`;
 
     setConfigLoading(true);
     try {
@@ -277,14 +286,33 @@ const LoginPage: React.FC = () => {
         }
       }
 
-      message.success(`服务器地址已保存：${fullUrl}`);
       setShowServerConfig(false);
+
+      // 连通性仅作提示，不作为保存前置条件：可能稍后才接入该网络
+      const reachable = await isServerReachable(fullUrl);
+      if (reachable) {
+        message.success(`服务器地址已保存：${fullUrl}`);
+      } else {
+        message.warning(`服务器地址已保存：${fullUrl}，但当前探测不可达，请确认地址与网络`);
+      }
+
+      // 各服务模块在加载时缓存了 baseURL，重新加载以让新地址生效
+      setTimeout(() => window.location.reload(), 800);
     } catch (e: any) {
       console.error('[server-config] save failed:', e);
       message.error('保存配置时发生错误：' + (e?.message || String(e)));
     } finally {
       setConfigLoading(false);
     }
+  };
+
+  // 清除服务器配置：桌面端回退到本机默认后端，Web 回退到当前站点
+  const handleResetServerConfig = () => {
+    setDynamicServerUrl('');
+    setServerIp('');
+    message.success(isElectron ? '已恢复默认后端地址' : '已恢复使用当前站点');
+    setShowServerConfig(false);
+    setTimeout(() => window.location.reload(), 800);
   };
 
   // 响应式样式 - 现代化玻璃拟态设计
@@ -401,9 +429,8 @@ const LoginPage: React.FC = () => {
 
   return (
     <div style={containerStyle}>
-      {/* Electron 桌面端右上角设置按钮 */}
-      {isElectron && (
-        <div style={{
+      {/* 服务器设置入口（桌面端与 Web 通用） */}
+      <div style={{
           position: 'absolute',
           top: '60px',
           right: '20px',
@@ -460,7 +487,6 @@ const LoginPage: React.FC = () => {
             }}
           />
         </div>
-      )}
 
       {/* 登录表单 */}
       <Card 
@@ -484,6 +510,22 @@ const LoginPage: React.FC = () => {
           onFinish={handleSubmit}
           initialValues={{ remember_me: true }}
         >
+          {/* Web 端：当前站点没有可用后端时引导配置服务器地址 */}
+          {showBackendHint && (
+            <Alert
+              message="未连接后端服务"
+              description="请点击右上角 ⚙ 设置后端服务地址（例如 38.76.181.214:3000）后再登录。"
+              type="warning"
+              showIcon
+              closable
+              onClose={() => setShowBackendHint(false)}
+              style={{
+                marginBottom: '16px',
+                borderRadius: '12px',
+              }}
+            />
+          )}
+
           {/* 错误提示 */}
           {loginError && (
             <Alert
@@ -672,12 +714,15 @@ const LoginPage: React.FC = () => {
         </Space>
       </div>
 
-      {/* 服务器配置弹窗 - 仅桌面端显示，定位到右上角 */}
+      {/* 服务器配置弹窗 - 桌面端与 Web 通用，定位到右上角 */}
       <Modal
         title="服务器设置"
         open={showServerConfig}
         onCancel={() => setShowServerConfig(false)}
         footer={[
+          <Button key="reset" onClick={handleResetServerConfig}>
+            {isElectron ? '恢复默认' : '使用当前站点'}
+          </Button>,
           <Button key="cancel" onClick={() => setShowServerConfig(false)}>
             取消
           </Button>,
@@ -691,27 +736,27 @@ const LoginPage: React.FC = () => {
       >
         <div style={{ marginBottom: '16px' }}>
           <Text type="secondary">
-            请输入服务器 IP 地址。<br />
-            桌面端将自动连接该服务器的 <code>:8000</code> API 端口
+            请输入后端服务地址，可带协议与端口，例如：<br />
+            <code>38.76.181.214:3000</code>、<code>http://192.168.1.100:8000</code>
           </Text>
         </div>
         <Input
-          placeholder="192.168.1.100"
+          placeholder="38.76.181.214:3000"
           value={serverIp}
           onChange={(e) => setServerIp(e.target.value)}
           prefix={<SettingOutlined style={{ color: '#999' }} />}
           size="large"
         />
-        {serverIp && (
+        {normalizeServerUrl(serverIp) && (
           <div style={{ marginTop: '12px', padding: '8px 12px', background: '#f5f5f5', borderRadius: '6px' }}>
             <Text type="secondary" style={{ fontSize: '13px' }}>
-              完整地址：http://{serverIp}:8000
+              完整地址：{normalizeServerUrl(serverIp)}
             </Text>
           </div>
         )}
         <div style={{ marginTop: '12px' }}>
           <Text type="secondary" style={{ fontSize: '12px' }}>
-            配置保存后将存储在本地，下次启动自动生效
+            配置保存在当前浏览器/客户端本地，重新加载后生效
           </Text>
         </div>
       </Modal>

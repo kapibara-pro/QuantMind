@@ -25,7 +25,7 @@ export const SERVICE_PORTS = {
 
 const ENV: Record<string, any> = typeof import.meta !== 'undefined' ? (import.meta as any).env || {} : {};
 
-// 动态服务器配置（桌面端用户设置）
+// 动态服务器配置（桌面端与 Web 浏览器均可设置）
 let dynamicServerUrl: string | null = null;
 const SERVER_URL_STORAGE_KEY = 'quantmind_server_url_v2';
 const LEGACY_SERVER_URL_STORAGE_KEY = 'quantmind_server_url';
@@ -33,8 +33,36 @@ const LEGACY_SERVER_URL_STORAGE_KEY = 'quantmind_server_url';
 // Electron 桌面端兜底地址：OSS 本地 Docker 后端（api 网关 8000）
 const DEFAULT_ELECTRON_API_BASE = 'http://127.0.0.1:8000';
 
+/**
+ * 归一化用户输入的服务器地址。
+ *
+ * 支持 `example.com`、`example.com:3000`、`http://example.com:3000`、
+ * `https://example.com/api/v1` 等写法，输出不含结尾斜杠的基础地址。
+ * 无法解析时返回 null。
+ */
+export function normalizeServerUrl(input: string): string | null {
+  const raw = String(input ?? '').trim();
+  if (!raw) return null;
+
+  const withProtocol = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw)
+    ? raw
+    : `http://${raw}`;
+
+  try {
+    const parsed = new URL(withProtocol);
+    if (!parsed.hostname) return null;
+    let path = parsed.pathname.replace(/\/+$/, '');
+    if (path.endsWith('/api/v1')) {
+      path = path.slice(0, -'/api/v1'.length);
+    }
+    return `${parsed.protocol}//${parsed.host}${path}`;
+  } catch {
+    return null;
+  }
+}
+
 function readPersistedServerUrl(): string | null {
-  if (typeof window === 'undefined' || !isElectronEnv()) return null;
+  if (typeof window === 'undefined') return null;
   try {
     return localStorage.getItem(SERVER_URL_STORAGE_KEY)?.trim() || null;
   } catch {
@@ -43,7 +71,7 @@ function readPersistedServerUrl(): string | null {
 }
 
 function readLegacyPersistedServerUrl(): string | null {
-  if (typeof window === 'undefined' || !isElectronEnv()) return null;
+  if (typeof window === 'undefined') return null;
   try {
     return localStorage.getItem(LEGACY_SERVER_URL_STORAGE_KEY)?.trim() || null;
   } catch {
@@ -52,14 +80,14 @@ function readLegacyPersistedServerUrl(): string | null {
 }
 
 function persistServerUrl(url: string | null): void {
-  if (typeof window === 'undefined' || !isElectronEnv()) return;
+  if (typeof window === 'undefined') return;
   try {
     if (url) {
       localStorage.setItem(SERVER_URL_STORAGE_KEY, url);
       localStorage.removeItem(LEGACY_SERVER_URL_STORAGE_KEY);
-    } else {
-      localStorage.removeItem(SERVER_URL_STORAGE_KEY);
+      return;
     }
+    localStorage.removeItem(SERVER_URL_STORAGE_KEY);
   } catch {
     // ignore storage failures
   }
@@ -77,33 +105,25 @@ export function isElectronEnv(): boolean {
   );
 }
 
-function clearWebServerUrlCache(): void {
-  if (typeof window === 'undefined' || isElectronEnv()) return;
-  try {
-    localStorage.removeItem(SERVER_URL_STORAGE_KEY);
-    localStorage.removeItem(LEGACY_SERVER_URL_STORAGE_KEY);
-  } catch {
-    // ignore storage failures
-  }
-}
-
-// Web builds use the current origin and Nginx proxy; old desktop-style URLs must not override it.
-clearWebServerUrlCache();
-
 /**
- * 校验服务器地址是否可达（通过 /health 端点）
+ * 校验服务器地址是否可达。
+ *
+ * 使用 `no-cors` 探测：只要网络层能连上目标主机即视为可达，避免后端未开放
+ * /health 的 CORS 响应头时把可用地址误判为失效而清除用户配置。
  */
 export async function isServerReachable(url: string, timeoutMs = 8000): Promise<boolean> {
+  if (!url) return false;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const res = await fetch(`${url.replace(/\/+$/, '')}/health`, {
+    await fetch(`${url.replace(/\/+$/, '')}/health`, {
       signal: controller.signal,
+      mode: 'no-cors',
       // 不携带凭据，仅做连通性探测
       cache: 'no-store',
     });
     clearTimeout(timer);
-    return res.ok;
+    return true;
   } catch {
     return false;
   }
@@ -125,26 +145,26 @@ async function clearStaleServerUrl(reason: string): Promise<void> {
 }
 
 /**
- * 初始化动态服务器配置（桌面端启动时调用）
- * 优先级：持久化配置 > Electron 配置文件 > 桌面端默认本地地址
+ * 初始化动态服务器配置（应用启动时调用，桌面端与 Web 通用）
+ * 优先级：持久化配置 > Electron 配置文件 > 环境变量 / 当前站点
  *
- * 关键约定：健康检查失败**绝不删除**用户已保存的服务器地址。
- * 后端可能正处于重启/冷启动/网络抖动，探测失败只打日志、保留配置并继续使用，
- * 避免“隔段时间保存的 IP 丢失、需重新配置”的问题。
+ * Web 模式下未配置过地址时不做任何探测，直接沿用当前站点（相对路径 + 反向代理），
+ * 因此默认部署行为保持不变；只有用户显式保存过地址才使用绝对后端地址。
  */
 export async function initDynamicServerUrl(): Promise<void> {
-  if (!isElectronEnv()) {
-    dynamicServerUrl = null;
-    clearWebServerUrlCache();
-    return;
-  }
-
   // 1. 持久化配置：若探测可达则采用；若确认不可达，清除缓存并回退本机默认，
   //    避免换 IP/克隆部署到新机器后始终连旧地址导致“验证身份”卡死。
   const persisted = readPersistedServerUrl();
   if (persisted) {
     const ok = await isServerReachable(persisted);
     if (ok) {
+      dynamicServerUrl = persisted;
+      return;
+    }
+    // Web 浏览器里的地址只可能来自用户在本机的显式设置，网络抖动或后端重启时
+    // 不静默清空，保留配置并提示；用户可随时在登录页「服务器设置」里修正。
+    if (!isElectronEnv()) {
+      console.warn(`[services] 服务器 ${persisted} 探测未通过，保留浏览器中保存的地址`);
       dynamicServerUrl = persisted;
       return;
     }
@@ -167,44 +187,51 @@ export async function initDynamicServerUrl(): Promise<void> {
     console.warn(`[services] 旧版服务器地址失效，清除缓存: ${legacy}`);
   }
 
-  // 3. Electron 配置文件：同样采用 + 后台探测日志，不清除
-  if (isElectronEnv()) {
-    try {
-      const url = await (window as any).electronAPI.getServerUrl();
-      if (url && typeof url === 'string') {
-        const normalized = url.replace(/\/+$/, '');
-        dynamicServerUrl = normalized;
-        persistServerUrl(normalized);
-        void isServerReachable(normalized).then((ok) => {
-          if (!ok) console.warn(`[services] 配置文件服务器 ${normalized} 探测未通过（可能暂不可达），保留并继续使用`);
-        });
-        return;
-      }
-    } catch (e) {
-      console.warn('[services] Failed to get server URL from config:', e);
-    }
+  // 3. Web 浏览器：没有用户配置时保持“当前站点”语义，不做额外探测。
+  if (!isElectronEnv()) {
+    dynamicServerUrl = null;
+    return;
+  }
 
-    // 4. 兜底：本地 OSS Docker 后端
-    if (!dynamicServerUrl) {
-      const ok = await isServerReachable(DEFAULT_ELECTRON_API_BASE);
-      if (ok) {
-        dynamicServerUrl = DEFAULT_ELECTRON_API_BASE;
-        persistServerUrl(DEFAULT_ELECTRON_API_BASE);
-      }
+  // 4. Electron 配置文件：同样采用 + 后台探测日志，不清除
+  try {
+    const url = await (window as any).electronAPI.getServerUrl();
+    if (url && typeof url === 'string') {
+      const normalized = url.replace(/\/+$/, '');
+      dynamicServerUrl = normalized;
+      persistServerUrl(normalized);
+      void isServerReachable(normalized).then((ok) => {
+        if (!ok) console.warn(`[services] 配置文件服务器 ${normalized} 探测未通过（可能暂不可达），保留并继续使用`);
+      });
+      return;
+    }
+  } catch (e) {
+    console.warn('[services] Failed to get server URL from config:', e);
+  }
+
+  // 5. 兜底：本地 OSS Docker 后端
+  if (!dynamicServerUrl) {
+    const ok = await isServerReachable(DEFAULT_ELECTRON_API_BASE);
+    if (ok) {
+      dynamicServerUrl = DEFAULT_ELECTRON_API_BASE;
+      persistServerUrl(DEFAULT_ELECTRON_API_BASE);
     }
   }
 }
 
 /**
- * 设置动态服务器配置（用户设置后调用）
+ * 设置动态服务器配置（用户设置后调用）。
+ *
+ * 传入空值时清除覆写：Web 回退到当前站点，桌面端回退到本机默认后端。
  */
 export function setDynamicServerUrl(url: string): void {
-  if (!isElectronEnv()) {
+  const trimmed = String(url ?? '').trim();
+  if (!trimmed) {
     dynamicServerUrl = null;
-    clearWebServerUrlCache();
+    persistServerUrl(null);
     return;
   }
-  dynamicServerUrl = url ? url.replace(/\/+$/, '') : null;
+  dynamicServerUrl = normalizeServerUrl(trimmed) ?? trimmed.replace(/\/+$/, '');
   persistServerUrl(dynamicServerUrl);
 }
 
@@ -212,7 +239,6 @@ export function setDynamicServerUrl(url: string): void {
  * 获取当前动态服务器配置
  */
 export function getDynamicServerUrl(): string | null {
-  if (!isElectronEnv()) return null;
   return dynamicServerUrl || readPersistedServerUrl();
 }
 
@@ -235,18 +261,10 @@ const API_BASE = normalizeBaseUrl(ENV.VITE_API_BASE_URL || '');
  * 获取基础 URL（优先使用动态配置）
  */
 function getBaseUrl(): string {
-  // Browser deployments stay on the current origin so Nginx can proxy /api and /ws.
-  if (!isElectronEnv()) {
-    return API_BASE;
-  }
-
-  // 桌面端优先使用用户配置的服务器地址
-  if (dynamicServerUrl) {
-    return dynamicServerUrl;
-  }
-  const persisted = readPersistedServerUrl();
-  if (persisted) {
-    return persisted;
+  // 用户显式配置的服务器地址优先级最高（桌面端与 Web 通用）
+  const configured = dynamicServerUrl || readPersistedServerUrl();
+  if (configured) {
+    return configured;
   }
   if (API_BASE) {
     return API_BASE;
@@ -255,6 +273,7 @@ function getBaseUrl(): string {
   if (isElectronEnv()) {
     return DEFAULT_ELECTRON_API_BASE;
   }
+  // Web 部署保持当前站点，交由 Nginx / 反向代理转发 /api 与 /ws。
   return API_BASE;
 }
 
