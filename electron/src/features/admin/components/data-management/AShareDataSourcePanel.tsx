@@ -379,8 +379,15 @@ export const AShareDataSourcePanel: React.FC<AShareDataSourcePanelProps> = ({ on
     const cancelSync = async () => {
         if (!activeJob) return;
         try {
-            await dataPlatformService.cancelDataSourceSyncJob(activeJob.job_id);
-            setActiveJob({ ...activeJob, status: 'cancelling' });
+            const result = await dataPlatformService.cancelDataSourceSyncJob(activeJob.job_id);
+            // worker 已失联时后端会直接把任务落成 cancelled，这里跟随真实状态，
+            // 避免界面停在一个永远不会更新的「取消中」。
+            const status = result?.status === 'cancelled' ? 'cancelled' : 'cancelling';
+            setActiveJob({ ...activeJob, status });
+            if (status === 'cancelled') {
+                setSyncing(false);
+                message.success('任务已取消');
+            }
         } catch (error: unknown) {
             const detail = error instanceof Error ? error.message : '未知错误';
             message.error(`取消失败: ${detail}`);

@@ -15,6 +15,13 @@ TTL_SECONDS = 24 * 3600
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 CELERY_FAILURE_STATES = {"FAILURE", "REVOKED"}
 
+# 任务心跳超时：worker 崩溃（容器被 OOM/磁盘写满杀死等）后不会有人回来收尾，
+# 状态会永远停在 running/cancelling，前端「取消」也点不动。
+# 超过该时长没有心跳即视为 worker 已丢失，由状态接口自愈为终态。
+DEFAULT_JOB_STALE_SECONDS = 900
+QUEUED_JOB_STALE_SECONDS_DEFAULT = 3600
+QLIB_JOB_STALE_SECONDS_DEFAULT = 300
+
 
 class ActiveSyncJobError(RuntimeError):
     """Raised when the same market/source already has an active sync job."""
@@ -245,30 +252,63 @@ def reconcile_job(job_id: str) -> dict[str, Any] | None:
             # Redis backend unavailable should not make the status endpoint fail.
             pass
 
-    if str(job.get("stage") or "").startswith("qlib"):
-        try:
-            stale_seconds = max(int(os.getenv("QLIB_JOB_STALE_SECONDS", "300")), 60)
-        except ValueError:
-            stale_seconds = 300
-        raw_updated = str(job.get("updated_at") or job.get("started_at") or "")
-        try:
-            updated = datetime.fromisoformat(raw_updated.replace("Z", "+00:00"))
-        except ValueError:
-            updated = datetime.now(timezone.utc)
-        if (datetime.now(timezone.utc) - updated).total_seconds() > stale_seconds:
-            upsert_job(
-                job_id,
-                status="failed",
-                stage="worker_lost",
-                current=None,
-                error=(
-                    f"Qlib 构建超过 {stale_seconds} 秒没有心跳，"
-                    "worker 可能因内存不足退出"
-                ),
-                finished_at=_now_iso(),
-            )
-            return get_job(job_id)
+    # 心跳超时自愈对所有阶段生效：worker 进程消失后没有任何人会把任务收尾，
+    # 前端会一直卡在 running/cancelling（并阻塞后续同名任务）。
+    stale_seconds = _stale_seconds_for(job)
+    if _job_heartbeat_expired(job, stale_seconds):
+        # 已经请求过取消：按「已取消」收尾，符合用户点取消时的预期；
+        # 否则按失败收尾并说明原因，避免伪装成成功。
+        cancelled = bool(job.get("cancel_requested")) or job.get("status") == "cancelling"
+        upsert_job(
+            job_id,
+            status="cancelled" if cancelled else "failed",
+            stage="cancelled" if cancelled else "worker_lost",
+            current=None,
+            error=(
+                None
+                if cancelled
+                else (
+                    f"任务超过 {stale_seconds} 秒没有心跳，worker 可能已退出"
+                    "（内存不足或磁盘写满）"
+                )
+            ),
+            finished_at=_now_iso(),
+        )
+        return get_job(job_id)
     return job
+
+
+def _stale_seconds_for(job: dict[str, Any]) -> int:
+    """心跳超时阈值。
+
+    - 排队中：worker 可能正忙于长任务，放宽到 1 小时再判定为僵尸；
+    - Qlib 构建：有心跳上报，5 分钟无心跳即视为 worker 丢失；
+    - 其他阶段（含发布）：15 分钟，容忍大 parquet 文件的单文件处理。
+    """
+    if job.get("status") == "queued":
+        default = QUEUED_JOB_STALE_SECONDS_DEFAULT
+        env_name = "DATA_SYNC_QUEUED_STALE_SECONDS"
+    elif str(job.get("stage") or "").startswith("qlib"):
+        default = QLIB_JOB_STALE_SECONDS_DEFAULT
+        env_name = "QLIB_JOB_STALE_SECONDS"
+    else:
+        default = DEFAULT_JOB_STALE_SECONDS
+        env_name = "DATA_SYNC_JOB_STALE_SECONDS"
+    try:
+        return max(int(os.getenv(env_name, str(default))), 60)
+    except ValueError:
+        return default
+
+
+def _job_heartbeat_expired(job: dict[str, Any], stale_seconds: int) -> bool:
+    raw_updated = str(job.get("updated_at") or job.get("started_at") or "")
+    try:
+        updated = datetime.fromisoformat(raw_updated.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated).total_seconds() > stale_seconds
 
 
 def reconcile_jobs(limit: int = 50) -> list[dict[str, Any]]:
@@ -292,10 +332,33 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def request_cancel(job_id: str) -> bool:
+    """提交取消请求。
+
+    幂等：重复点击「取消」不会报错，也不会把已进入取消中的任务卡住。
+    worker 已经消失（心跳超时）时直接落终态，避免任务永远停在 cancelling。
+    """
     job = get_job(job_id)
-    if not job or job.get("status") not in {"queued", "running"}:
+    if not job or job.get("status") not in ACTIVE_STATUSES:
         return False
+
+    # 先按取消前的心跳判断 worker 是否还在：upsert 会把 updated_at 刷成现在，
+    # 之后再判断就永远“不超时”了。
+    worker_lost = _job_heartbeat_expired(job, _stale_seconds_for(job))
     upsert_job(job_id, cancel_requested=True, status="cancelling")
+
+    if worker_lost:
+        # 没有 worker 会再读取消标记，直接收尾，否则任务永远停在 cancelling。
+        upsert_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            current=None,
+            error=None,
+            finished_at=_now_iso(),
+        )
+    else:
+        # worker 仍可能已异常退出（Celery 任务失败/被撤销），交给自愈逻辑兜底。
+        reconcile_job(job_id)
     return True
 
 

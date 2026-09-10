@@ -475,6 +475,18 @@ async def create_data_source_sync_job(
         upsert_job,
     )
 
+    # 磁盘余量预检（快速失败）：数据盘写满会连带打挂 Redis/Celery，
+    # 使任务卡在 running 且无法取消，因此提交前先拦住。
+    from backend.shared.disk_guard import InsufficientDiskSpaceError, ensure_disk_headroom
+
+    try:
+        ensure_disk_headroom(
+            os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb"),
+            os.getenv("QM_EASY_TDX_DATA_DIR", "/data/easy_tdx"),
+        )
+    except InsufficientDiskSpaceError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+
     try:
         job = create_job(
             source_id=payload.source_id,
@@ -555,13 +567,17 @@ async def cancel_data_source_sync_job(
     job_id: str,
     current_user: dict = Depends(require_admin),
 ):
-    from backend.shared.data_sync_jobs import request_cancel
+    from backend.shared.data_sync_jobs import get_job, request_cancel
 
     if not request_cancel(job_id):
         raise HTTPException(status_code=409, detail="任务不存在或已经结束")
+    # worker 已消失的任务会在 request_cancel 内直接落终态，这里回传真实状态，
+    # 前端不必再等一个永远不会到来的进度更新。
+    job = get_job(job_id) or {}
+    status = str(job.get("status") or "cancelling")
     return {
         "success": True,
-        "data": {"job_id": job_id, "status": "cancelling"},
+        "data": {"job_id": job_id, "status": status, "job": job or None},
     }
 
 

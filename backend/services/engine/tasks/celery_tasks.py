@@ -1266,6 +1266,14 @@ def run_data_source_sync(job_id: str) -> dict[str, Any]:
     operation = str(job.get("operation") or "sync")
     upsert_job(job_id, status="running", stage="starting", current="初始化数据源")
     try:
+        # 磁盘余量预检：数据盘写满会同时打挂 Redis 与 Celery worker，
+        # 让任务永久卡在 running。宁可在这里明确失败，也不要写满整台机器。
+        from backend.shared.disk_guard import ensure_disk_headroom
+
+        ensure_disk_headroom(
+            os.getenv("QM_QUANTDB_DATA_DIR", "/data/quantdb"),
+            os.getenv("QM_EASY_TDX_DATA_DIR", "/data/easy_tdx"),
+        )
         if source_id == "easy_tdx":
             callback = progress_callback(job_id)
             if operation == "publish":

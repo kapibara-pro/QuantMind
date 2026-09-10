@@ -121,7 +121,14 @@ def publish(
     """
     source_root = source_data_dir()
     target_root = target_data_dir()
+    from backend.shared.disk_guard import ensure_disk_headroom
+
     with _publication_lock(target_root):
+        # 拿到发布锁后再回收历史残留：此时不会误删另一个正在进行的发布的暂存区。
+        _prune_publish_runs(target_root)
+        # 写满数据盘会连带拖垮 Redis/Celery，使发布任务永久卡在 running
+        #（历史上正是这样卡住的），因此先确认余量再开始。
+        ensure_disk_headroom(target_root, source_root)
         return _publish_locked(
             source_root=source_root,
             target_root=target_root,
@@ -967,8 +974,16 @@ def _prune_publish_runs(target_root: Path) -> None:
     if not root.is_dir():
         return
     runs = sorted((path for path in root.iterdir() if path.is_dir()), reverse=True)
+    # 超出保留数量的历史发布（含其 backup 回滚副本）：整目录回收。
     for stale in runs[keep:]:
         try:
             _remove_tree(stale)
+        except OSError:
+            pass
+    # 保留目录里的 staging 是发布期间的临时产物，发布结束（含 worker 崩溃）
+    # 后没有任何用途，累积起来可达数 GB。发布锁已持有，可安全清理。
+    for run in runs:
+        try:
+            _remove_tree(run / "staging")
         except OSError:
             pass
