@@ -106,7 +106,9 @@ const LoginPage: React.FC = () => {
       if (!isElectronApp && !savedUrl) {
         try {
           const res = await fetch('/health', { cache: 'no-store' });
-          setShowBackendHint(!res.ok);
+          // 前端开发服务器对未知路径会返回 index.html（HTML），据此识别“没有后端”
+          const contentType = res.headers.get('content-type') || '';
+          setShowBackendHint(!res.ok || !contentType.includes('application/json'));
         } catch {
           setShowBackendHint(true);
         }
