@@ -875,6 +875,32 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
+    async startThsSnapshotCollection(mode: 'daily' | 'auction' = 'daily'): Promise<{
+        task_id: string;
+        mode: 'daily' | 'auction';
+        status: string;
+        timestamp: string;
+    }> {
+        const resp = await this.axiosInstance.post(
+            '/admin/data-platform/ths-snapshots/collect',
+            { mode },
+        );
+        return this.unwrap(resp);
+    }
+
+    async getThsSnapshotCollectionStatus(taskId: string): Promise<{
+        task_id: string;
+        status: string;
+        result?: Record<string, unknown> | null;
+        error?: string | null;
+        timestamp: string;
+    }> {
+        const resp = await this.axiosInstance.get(
+            `/admin/data-platform/ths-snapshots/collect/${encodeURIComponent(taskId)}`,
+        );
+        return this.unwrap(resp);
+    }
+
     async previewThsSnapshot(params: {
         dataset: string;
         snapshot_date?: string;

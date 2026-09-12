@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -160,6 +160,10 @@ class ThsSnapshotConfigRequest(BaseModel):
     index_codes: str | None = Field(default=None, max_length=2000)
 
 
+class ThsSnapshotCollectRequest(BaseModel):
+    mode: str = Field(default="daily", pattern="^(daily|auction)$")
+
+
 def _validate_base_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
     parsed = urlparse(normalized)
@@ -254,6 +258,64 @@ async def save_ths_snapshot_config(
             "error": verify_error,
         },
     }
+
+
+@router.post("/collect")
+async def collect_ths_snapshot_now(
+    payload: ThsSnapshotCollectRequest,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    """将一次同花顺快照采集投递到 Celery，立即返回任务编号。"""
+    if not get_secret("HITHINK_FINANCE_API_KEY"):
+        raise HTTPException(status_code=409, detail="请先配置同花顺 API Key")
+
+    from backend.services.engine.qlib_app.celery_config import celery_app
+
+    task_name = (
+        "engine.tasks.ths_auction_snapshot"
+        if payload.mode == "auction"
+        else "engine.tasks.ths_daily_snapshot"
+    )
+    try:
+        async_result = celery_app.send_task(
+            task_name,
+            queue=os.getenv("QLIB_CELERY_QUEUE", "qlib_backtest_srv"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("同花顺即时采集任务派发失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail="同花顺采集任务派发失败") from exc
+
+    return {
+        "success": True,
+        "data": {
+            "task_id": async_result.id,
+            "mode": payload.mode,
+            "status": "queued",
+            "timestamp": _now_iso(),
+        },
+    }
+
+
+@router.get("/collect/{task_id}")
+async def get_ths_snapshot_collect_status(
+    task_id: str = Path(..., min_length=1, max_length=128),
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    """查询即时采集任务状态。"""
+    from backend.services.engine.qlib_app.celery_config import celery_app
+
+    result = celery_app.AsyncResult(task_id)
+    status = str(result.status or "PENDING").lower()
+    data: dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "timestamp": _now_iso(),
+    }
+    if result.successful():
+        data["result"] = result.result
+    elif result.failed():
+        data["error"] = str(result.result)
+    return {"success": True, "data": data}
 
 
 async def _snapshot_table_exists(session: Any) -> bool:

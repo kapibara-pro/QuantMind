@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
-    ClockCircleOutlined, DatabaseOutlined, EyeOutlined, ReloadOutlined,
+    ClockCircleOutlined, DatabaseOutlined, EyeOutlined, PlayCircleOutlined, ReloadOutlined,
     SearchOutlined,
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
@@ -237,6 +237,9 @@ export function AdminThsSnapshotPanel() {
     const [scheduleEnabled, setScheduleEnabled] = useState(false);
     const [loading, setLoading] = useState(false);
     const [previewDataset, setPreviewDataset] = useState<ThsSnapshotDataset | null>(null);
+    const [collectingMode, setCollectingMode] = useState<'daily' | 'auction' | null>(null);
+    const [collectTaskId, setCollectTaskId] = useState<string | null>(null);
+    const [collectError, setCollectError] = useState<string | null>(null);
 
     const loadCatalog = useCallback(async () => {
         setLoading(true);
@@ -257,6 +260,54 @@ export function AdminThsSnapshotPanel() {
     useEffect(() => {
         loadCatalog();
     }, [loadCatalog]);
+
+    const startCollection = useCallback(async (mode: 'daily' | 'auction') => {
+        setCollectingMode(mode);
+        setCollectTaskId(null);
+        setCollectError(null);
+        try {
+            const result = await dataPlatformService.startThsSnapshotCollection(mode);
+            setCollectTaskId(result.task_id);
+            message.info(mode === 'auction' ? '竞价快照任务已加入队列' : '盘后快照任务已加入队列');
+        } catch (error: unknown) {
+            setCollectingMode(null);
+            setCollectError(describeError(error));
+            message.error(`立即采集失败: ${describeError(error)}`);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!collectTaskId) return undefined;
+        let active = true;
+        const poll = async () => {
+            try {
+                const result = await dataPlatformService.getThsSnapshotCollectionStatus(collectTaskId);
+                if (!active) return;
+                if (result.status === 'success') {
+                    message.success('同花顺快照采集完成，目录已刷新');
+                    setCollectingMode(null);
+                    setCollectTaskId(null);
+                    await loadCatalog();
+                } else if (['failure', 'revoked'].includes(result.status)) {
+                    setCollectError(result.error || '采集任务执行失败');
+                    setCollectingMode(null);
+                    setCollectTaskId(null);
+                }
+            } catch (error: unknown) {
+                if (active) {
+                    setCollectError(describeError(error));
+                    setCollectingMode(null);
+                    setCollectTaskId(null);
+                }
+            }
+        };
+        poll();
+        const timer = window.setInterval(poll, 2000);
+        return () => {
+            active = false;
+            window.clearInterval(timer);
+        };
+    }, [collectTaskId, loadCatalog]);
 
     const datasetsByGroup = useMemo(() => {
         const grouped = new Map<string, ThsSnapshotDataset[]>();
@@ -370,9 +421,28 @@ export function AdminThsSnapshotPanel() {
                         {scheduleEnabled ? '定时采集中' : '定时采集关闭'}
                     </Tag>
                 </Space>
-                <Button icon={<ReloadOutlined />} onClick={loadCatalog} loading={loading}>
-                    刷新
-                </Button>
+                <Space wrap>
+                    <Button
+                        type="primary"
+                        icon={<PlayCircleOutlined />}
+                        onClick={() => startCollection('daily')}
+                        loading={collectingMode === 'daily'}
+                        disabled={collectingMode !== null || !apiKeyConfigured}
+                    >
+                        立即采集盘后
+                    </Button>
+                    <Button
+                        icon={<PlayCircleOutlined />}
+                        onClick={() => startCollection('auction')}
+                        loading={collectingMode === 'auction'}
+                        disabled={collectingMode !== null || !apiKeyConfigured}
+                    >
+                        立即采集竞价
+                    </Button>
+                    <Button icon={<ReloadOutlined />} onClick={loadCatalog} loading={loading}>
+                        刷新
+                    </Button>
+                </Space>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 border border-slate-200 bg-slate-50">
@@ -392,6 +462,24 @@ export function AdminThsSnapshotPanel() {
 
             {!apiKeyConfigured && (
                 <Alert type="warning" showIcon message="同花顺 API Key 尚未配置" />
+            )}
+            {collectError && (
+                <Alert
+                    type="error"
+                    showIcon
+                    closable
+                    onClose={() => setCollectError(null)}
+                    message="同花顺即时采集失败"
+                    description={collectError}
+                />
+            )}
+            {collectingMode && collectTaskId && (
+                <Alert
+                    type="info"
+                    showIcon
+                    message={collectingMode === 'auction' ? '竞价快照采集中' : '盘后快照采集中'}
+                    description="任务在后台执行，完成后目录会自动刷新。"
+                />
             )}
 
             <Collapse
