@@ -235,6 +235,8 @@ def _scan_specs(root: Path, specs: Iterable[Any]) -> None:
             # 扫描失败时保留旧值，避免区间在页面上闪成空。
             if bounds or key not in _cache:
                 _cache[key] = (time.time(), bounds)
+        # 每个数据集扫完就落盘：即使刷新途中进程重启，已完成的部分也不丢。
+        _write_snapshot(root)
 
 
 def refresh_bounds(root: Path, specs: Iterable[Any]) -> None:
