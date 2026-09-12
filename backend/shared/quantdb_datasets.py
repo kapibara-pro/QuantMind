@@ -8,6 +8,10 @@ layout 决定落盘形态与扫描/预览读法：
   symbol    — 每标的一个 {SYMBOL}.parquet
   single    — 整个数据集一个 parquet（文件名不定，如 instrument_list.parquet）
 
+``date_column`` 声明该数据集用于计算"数据区间"的时间列：按日分区布局
+能从目录名直接推出区间，按标的/单文件布局只能读 parquet footer 统计，
+未声明或列不存在的数据集（如快照类）区间显示为 “—”。
+
 云端 object key 与本地落盘相对路径一致（posix 分隔），
 例如 ``1_kline_data/daily_forward/dt=20260804/data.parquet``。
 """
@@ -29,6 +33,7 @@ class DatasetSpec:
     rel_dir: str
     layout: Layout
     note: str = ""
+    date_column: str | None = None
 
 
 GROUPS: list[dict[str, str]] = [
@@ -46,23 +51,23 @@ DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec("daily_backward", "日线后复权", "1", "kline", "1_kline_data/daily_backward", "partition", "当前价×复权因子，除权后整段回溯"),
     DatasetSpec("daily_unadjusted", "日线不复权", "1", "kline", "1_kline_data/daily_unadjusted", "partition", "原始价，撮合/涨跌停判定用"),
     DatasetSpec("index_daily", "指数日线", "1", "kline", "1_kline_data/index_daily", "partition", "主要指数日K走势"),
-    DatasetSpec("min5_kline", "5分钟线", "1", "kline", "1_kline_data/min5_kline", "symbol", "5 分钟级日内行情"),
-    DatasetSpec("min1_kline", "1分钟线", "1", "kline", "1_kline_data/min1_kline", "symbol", "体积大，按需同步"),
+    DatasetSpec("min5_kline", "5分钟线", "1", "kline", "1_kline_data/min5_kline", "symbol", "5 分钟级日内行情", "time"),
+    DatasetSpec("min1_kline", "1分钟线", "1", "kline", "1_kline_data/min1_kline", "symbol", "体积大，按需同步", "time"),
     DatasetSpec("tick_data", "Tick逐笔", "1", "kline", "1_kline_data/tick_data", "partition", "逐笔成交，流量消耗极高"),
     # 2 基础板块
     DatasetSpec("instrument_detail", "个股详情", "2", "base_sector", "2_base_sector/instrument_detail", "single", "152 列基本面快照"),
     DatasetSpec("sector_concept", "板块概念", "2", "base_sector", "2_base_sector/sector_concept", "single", "行业/概念板块成分"),
     DatasetSpec("index_weights", "指数权重", "2", "base_sector", "2_base_sector/index_weights", "symbol", "沪深300/中证500/1000 等"),
-    DatasetSpec("trading_calendar", "交易日历", "2", "base_sector", "2_base_sector/trading_calendar", "single", "A股交易日历"),
+    DatasetSpec("trading_calendar", "交易日历", "2", "base_sector", "2_base_sector/trading_calendar", "single", "A股交易日历", "TradingDate"),
     DatasetSpec("margin_trading", "融资融券", "2", "base_sector", "2_base_sector/margin_trading", "partition", "两融余额明细"),
     # 3 财务数据
-    DatasetSpec("balance", "资产负债表", "3", "financial", "3_financial_data/balance", "symbol", "资产/负债/权益"),
-    DatasetSpec("income", "利润表", "3", "financial", "3_financial_data/income", "symbol", "营收/净利/每股收益"),
-    DatasetSpec("cashflow", "现金流量表", "3", "financial", "3_financial_data/cashflow", "symbol", "经营/投资/筹资现金流"),
-    DatasetSpec("capital", "股本结构", "3", "financial", "3_financial_data/capital", "symbol", "总股本/流通股本变动"),
-    DatasetSpec("pershare_index", "每股指标", "3", "financial", "3_financial_data/pershare_index", "symbol", "每股收益/净资产等"),
-    DatasetSpec("dividend_factors", "分红因子", "3", "financial", "3_financial_data/dividend_factors", "symbol", "历次分红送转因子"),
-    DatasetSpec("holder_num", "股东户数", "3", "financial", "3_financial_data/holder_num", "symbol", "股东户数变化"),
+    DatasetSpec("balance", "资产负债表", "3", "financial", "3_financial_data/balance", "symbol", "资产/负债/权益", "m_timetag"),
+    DatasetSpec("income", "利润表", "3", "financial", "3_financial_data/income", "symbol", "营收/净利/每股收益", "m_timetag"),
+    DatasetSpec("cashflow", "现金流量表", "3", "financial", "3_financial_data/cashflow", "symbol", "经营/投资/筹资现金流", "m_timetag"),
+    DatasetSpec("capital", "股本结构", "3", "financial", "3_financial_data/capital", "symbol", "总股本/流通股本变动", "m_timetag"),
+    DatasetSpec("pershare_index", "每股指标", "3", "financial", "3_financial_data/pershare_index", "symbol", "每股收益/净资产等", "m_timetag"),
+    DatasetSpec("dividend_factors", "分红因子", "3", "financial", "3_financial_data/dividend_factors", "symbol", "历次分红送转因子", "time"),
+    DatasetSpec("holder_num", "股东户数", "3", "financial", "3_financial_data/holder_num", "symbol", "股东户数变化", "endDate"),
     # 4 债券/ETF
     DatasetSpec("etf_pcf", "ETF申赎清单", "4", "bond_etf", "4_bond_etf/etf_pcf", "symbol", "ETF 申购赎回清单"),
     DatasetSpec("convertible_bond", "可转债", "4", "bond_etf", "4_bond_etf/convertible_bond", "symbol", "可转债行情与条款"),

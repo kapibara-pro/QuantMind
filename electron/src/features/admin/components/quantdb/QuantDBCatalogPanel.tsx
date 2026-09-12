@@ -294,9 +294,17 @@ export function QuantDBCatalogPanel({ connected, enabled, onPreview, refreshSign
             key: 'range',
             width: 200,
             align: 'center',
-            render: (_, row) => (row.start_date
-                ? `${formatPartitionDate(row.start_date)} → ${formatPartitionDate(row.end_date)}`
-                : '—'),
+            render: (_, row) => {
+                if (!row.start_date) return '—';
+                const label = `${formatPartitionDate(row.start_date)} → ${formatPartitionDate(row.end_date)}`;
+                // 分钟线等日内数据补一个精确时间，便于确认最新进度到哪一根。
+                if (!row.end_at) return label;
+                return (
+                    <Tooltip title={`最新数据：${row.end_at.replace('T', ' ')}`}>
+                        <Text>{label}</Text>
+                    </Tooltip>
+                );
+            },
         },
         {
             title: '说明',

@@ -209,6 +209,9 @@ export interface QuantDBDataset {
     size_mb: number;
     start_date?: string;
     end_date?: string;
+    /** 日内数据（分钟线）的精确边界，ISO 秒级，用于展示"最新到哪一根"。 */
+    start_at?: string;
+    end_at?: string;
     partitions?: number;
     updated_at?: string;
 }

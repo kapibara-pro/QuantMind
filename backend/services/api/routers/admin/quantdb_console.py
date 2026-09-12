@@ -18,6 +18,7 @@ GET  /api/v1/admin/data-platform/quantdb/calendar        远端交易日历
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import os
@@ -58,6 +59,10 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 # 规格定义在 backend/shared/quantdb_datasets.py（供管理台与本地扫描脚本共用）
 from backend.shared.quantdb_datasets import DATASETS, DatasetSpec, GROUPS  # noqa: E402
+from backend.shared.quantdb_range import (  # noqa: E402
+    dataset_time_bounds,
+    prewarm_bounds,
+)
 
 _BY_NAME = {ds.dataset: ds for ds in DATASETS}
 
@@ -122,10 +127,54 @@ def _dataset_stats(spec: DatasetSpec, root: Path) -> dict[str, Any]:
             stats["start_date"] = dates[0]
             stats["end_date"] = dates[-1]
             stats["partitions"] = len(dates)
+    else:
+        # 按标的/单文件布局的路径里没有日期，只能读 parquet footer 统计；
+        # 快照类数据集未声明 date_column，这里会直接返回 {}。
+        stats.update(dataset_time_bounds(root, spec))
     if files:
         latest = max(f.stat().st_mtime for f in files)
         stats["updated_at"] = datetime.fromtimestamp(latest, tz=timezone.utc).isoformat().replace("+00:00", "Z")
     return stats
+
+
+def _build_catalog_payload() -> dict[str, Any]:
+    """组装数据集目录（含落盘统计）。同步函数，由接口放入线程池执行。"""
+    root = _data_dir()
+    # 区间统计要读 5000+ 个 parquet footer，先并发预热再顺序取缓存值。
+    prewarm_bounds(root, DATASETS)
+
+    items = []
+    for spec in DATASETS:
+        items.append({
+            "dataset": spec.dataset,
+            "name": spec.name,
+            "group": spec.group,
+            "category_id": spec.category_id,
+            "layout": spec.layout,
+            "rel_dir": spec.rel_dir,
+            "note": spec.note,
+            **_dataset_stats(spec, root),
+        })
+
+    groups = []
+    for g in GROUPS:
+        members = [it for it in items if it["group"] == g["id"]]
+        groups.append({
+            **g,
+            "dataset_count": len(members),
+            "synced_count": sum(1 for it in members if it["synced"]),
+            "files": sum(it["files"] for it in members),
+            "size_mb": round(sum(it["size_mb"] for it in members), 1),
+        })
+    return {
+        "success": True,
+        "data": {
+            "data_dir": str(root),
+            "groups": groups,
+            "datasets": items,
+            "timestamp": _now_iso(),
+        },
+    }
 
 
 @router.get("/catalog")
@@ -137,47 +186,16 @@ async def get_catalog(current_user: dict = Depends(require_admin)):
             return _catalog_cache["payload"]
 
     try:
-        root = _data_dir()
-        items = []
-        for spec in DATASETS:
-            items.append({
-                "dataset": spec.dataset,
-                "name": spec.name,
-                "group": spec.group,
-                "category_id": spec.category_id,
-                "layout": spec.layout,
-                "rel_dir": spec.rel_dir,
-                "note": spec.note,
-                **_dataset_stats(spec, root),
-            })
-
-        groups = []
-        for g in GROUPS:
-            members = [it for it in items if it["group"] == g["id"]]
-            groups.append({
-                **g,
-                "dataset_count": len(members),
-                "synced_count": sum(1 for it in members if it["synced"]),
-                "files": sum(it["files"] for it in members),
-                "size_mb": round(sum(it["size_mb"] for it in members), 1),
-            })
-
-        payload = {
-            "success": True,
-            "data": {
-                "data_dir": str(root),
-                "groups": groups,
-                "datasets": items,
-                "timestamp": _now_iso(),
-            },
-        }
-        with _catalog_cache_lock:
-            _catalog_cache["ts"] = time.monotonic()
-            _catalog_cache["payload"] = payload
-        return payload
+        # 统计含 5000+ 次 parquet footer 读取，放线程池避免阻塞事件循环。
+        payload = await asyncio.to_thread(_build_catalog_payload)
     except Exception as exc:  # noqa: BLE001
         logger.error("quantdb catalog failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"failed: {exc}")
+
+    with _catalog_cache_lock:
+        _catalog_cache["ts"] = time.monotonic()
+        _catalog_cache["payload"] = payload
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1179,8 @@ async def get_remote_diff(
     specs = [s for s in DATASETS if not filter_names or s.dataset in filter_names]
 
     root = _data_dir()
+    # 按标的布局的本地区间要扫 parquet footer，先并发预热，避免逐个数据集串行扫。
+    prewarm_bounds(root, specs)
 
     items: list[dict[str, Any]] = []
     summary = {"total_datasets": len(specs), "up_to_date": 0, "updates_available": 0, "not_synced": 0, "unknown": 0}
