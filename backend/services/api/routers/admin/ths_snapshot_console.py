@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.runtime_secrets import get_secret, mask_secret, runtime_env_path, set_secret
 from backend.shared.stock_utils import StockCodeUtil
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -147,6 +150,112 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+class ThsSnapshotConfigRequest(BaseModel):
+    """管理台可修改的同花顺运行时配置。"""
+
+    api_key: str | None = Field(default=None, max_length=512)
+    snapshot_enabled: bool | None = None
+    base_url: str | None = Field(default=None, max_length=256)
+    symbols: str | None = Field(default=None, max_length=20000)
+    index_codes: str | None = Field(default=None, max_length=2000)
+
+
+def _validate_base_url(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="base_url 必须是有效的 HTTP(S) 地址")
+    return normalized
+
+
+def _ths_config_payload() -> dict[str, Any]:
+    api_key = get_secret("HITHINK_FINANCE_API_KEY")
+    return {
+        "api_key_configured": bool(api_key),
+        "api_key_masked": mask_secret(api_key),
+        "base_url": os.getenv("HITHINK_FINANCE_BASE_URL", "https://fuyao.aicubes.cn").rstrip("/"),
+        "snapshot_enabled": os.getenv(
+            "HITHINK_FINANCE_SNAPSHOT_ENABLED", "false"
+        ).lower()
+        == "true",
+        "symbols": os.getenv("HITHINK_FINANCE_SYMBOLS", ""),
+        "index_codes": os.getenv(
+            "HITHINK_FINANCE_INDEX_CODES",
+            "000300.SH,000001.SH,399001.SZ,399006.SZ",
+        ),
+        "runtime_env_file": str(runtime_env_path()),
+        "timestamp": _now_iso(),
+    }
+
+
+@router.get("/config")
+async def get_ths_snapshot_config(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+    """返回同花顺快照配置状态，API Key 永不返回明文。"""
+    return {"success": True, "data": _ths_config_payload()}
+
+
+@router.post("/config")
+async def save_ths_snapshot_config(
+    payload: ThsSnapshotConfigRequest,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    """保存同花顺快照配置，并在提交新 Key 时即时验证连接。"""
+    values: dict[str, str] = {}
+    if payload.api_key is not None:
+        api_key = payload.api_key.strip()
+        if api_key and len(api_key) < 8:
+            raise HTTPException(status_code=400, detail="api_key 至少需要 8 位")
+        if api_key:
+            values["HITHINK_FINANCE_API_KEY"] = api_key
+    if payload.snapshot_enabled is not None:
+        values["HITHINK_FINANCE_SNAPSHOT_ENABLED"] = "true" if payload.snapshot_enabled else "false"
+    if payload.base_url is not None and payload.base_url.strip():
+        values["HITHINK_FINANCE_BASE_URL"] = _validate_base_url(payload.base_url)
+    if payload.symbols is not None:
+        values["HITHINK_FINANCE_SYMBOLS"] = payload.symbols.strip()
+    if payload.index_codes is not None:
+        values["HITHINK_FINANCE_INDEX_CODES"] = payload.index_codes.strip()
+
+    try:
+        for key, value in values.items():
+            set_secret(key, value)
+    except (ValueError, OSError) as exc:
+        logger.error("写入同花顺运行时配置失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="写入同花顺配置失败") from exc
+
+    verified = None
+    verify_error = None
+    if "HITHINK_FINANCE_API_KEY" in values:
+        try:
+            from backend.services.engine.data_platform.ths_snapshots import ThsFinanceClient
+
+            client = ThsFinanceClient(
+                api_key=values["HITHINK_FINANCE_API_KEY"],
+                base_url=values.get("HITHINK_FINANCE_BASE_URL")
+                or os.getenv("HITHINK_FINANCE_BASE_URL"),
+                timeout=10,
+                max_retries=0,
+            )
+            client.get(
+                "/api/meta/tickers/list",
+                {"exchange": "SH", "asset_type": "a-share", "limit": 1, "offset": 0},
+            )
+            verified = True
+        except Exception as exc:  # noqa: BLE001
+            verified = False
+            verify_error = str(exc)
+            logger.warning("同花顺 API Key 校验失败: %s", exc)
+
+    return {
+        "success": True,
+        "data": {
+            **_ths_config_payload(),
+            "verified": verified,
+            "error": verify_error,
+        },
+    }
+
+
 async def _snapshot_table_exists(session: Any) -> bool:
     result = await session.execute(
         text("SELECT to_regclass('public.qm_ths_daily_snapshots') IS NOT NULL")
@@ -224,9 +333,7 @@ async def get_ths_snapshot_catalog() -> dict[str, Any]:
             "source": "ths",
             "storage_type": "postgres_snapshot",
             "table_ready": table_exists,
-            "api_key_configured": bool(
-                os.getenv("HITHINK_FINANCE_API_KEY", "").strip()
-            ),
+            "api_key_configured": bool(get_secret("HITHINK_FINANCE_API_KEY")),
             "schedule_enabled": os.getenv(
                 "HITHINK_FINANCE_SNAPSHOT_ENABLED", "false"
             ).lower()
