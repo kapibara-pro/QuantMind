@@ -1,34 +1,58 @@
 """按标的 / 单文件布局数据集的真实数据区间。
 
 分区布局（``dt=YYYYMMDD/data.parquet``）的区间能直接从目录名读出；
-按标的布局（``{SYMBOL}.parquet``）的路径里没有任何日期信息，必须读
+按标的布局（``{SYMBOL}.parquet``）的路径里没有任何日期信息，只能读
 parquet 数据块尾部的统计信息（min/max statistics）才能得到真实区间。
 
-这里只读 footer、不解码数据页：实测 5000+ 文件约 2-4 秒，结果带 TTL
-缓存；管理台目录/差异接口会先用 :func:`prewarm_bounds` 并发预热。
+扫描一个数据集要打开 5000+ 次文件 footer，单次约 1-5 秒、全部按标的
+数据集合计约 30 秒，因此这里**不与请求同步**：
+
+1. 接口只从内存缓存（或磁盘快照）读值，未命中先显示空；
+2. :func:`prewarm_bounds` 发现过期/缺失时起后台线程单飞刷新；
+3. 结果落盘到 ``<data_dir>/.sync_state/catalog_ranges.json``，容器重启
+   后仍能立即展示，不必重新扫盘。
+
+分钟线的"最新进度"由 TTL 决定（默认 6 小时），同步完成后重新加载页面
+即可看到更新，无需等待接口变慢。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
-# 单个数据集 5000+ 个文件仍要打开 5000+ 次 footer，缓存 10 分钟，
-# 避免页面重复加载时反复扫盘。
-RANGE_CACHE_TTL_SECONDS = 600.0
-DEFAULT_SCAN_WORKERS = 8
-# 防御性上限：异常目录（如误挂载）不应把管理台接口拖死。
+# 数据只在同步/发布时变化，缓存 6 小时足够；到期后由后台线程刷新。
+RANGE_CACHE_TTL_SECONDS = 6 * 3600.0
+# 扫描结果为空（如列名不匹配）时缩短重试间隔，避免一直空着。
+EMPTY_RANGE_RETRY_SECONDS = 600.0
+# 防御性上限：异常目录（如误挂载）不应拖垮后台刷新。
 MAX_SCAN_FILES = 30000
 
-_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+SNAPSHOT_REL_PATH = Path(".sync_state") / "catalog_ranges.json"
+
+_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _cache_lock = threading.Lock()
+_loaded_roots: set[str] = set()
+_refreshing: set[str] = set()
+
+
+def _rel_key(spec: Any) -> str:
+    return f"{getattr(spec, 'rel_dir', '')}|{getattr(spec, 'date_column', '')}"
+
+
+def _cache_key(root: Path, spec: Any) -> str:
+    return f"{root}|{_rel_key(spec)}"
+
+
+def _snapshot_path(root: Path) -> Path:
+    return root / SNAPSHOT_REL_PATH
 
 
 def _as_datetime(value: Any) -> datetime | None:
@@ -136,57 +160,177 @@ def _scan_directory(directory: Path, column: str) -> dict[str, Any]:
     return payload
 
 
-def dataset_time_bounds(
-    root: Path, spec: Any, *, use_cache: bool = True
-) -> dict[str, Any]:
-    """返回数据集真实区间；spec 未声明 date_column 或读不到时返回 {}。"""
-    column = getattr(spec, "date_column", None)
-    if not column:
-        return {}
+def _load_snapshot(root: Path) -> None:
+    """把落盘快照读进内存（每个 root 只读一次）。"""
+    with _cache_lock:
+        if str(root) in _loaded_roots:
+            return
+        _loaded_roots.add(str(root))
 
-    key = (str(root), str(getattr(spec, "rel_dir", "")), str(column))
-    if use_cache:
-        with _cache_lock:
-            hit = _cache.get(key)
-        if hit is not None and time.monotonic() - hit[0] < RANGE_CACHE_TTL_SECONDS:
-            return dict(hit[1])
-
+    path = _snapshot_path(root)
     try:
-        bounds = _scan_directory(root / spec.rel_dir, column)
-    except Exception as exc:  # noqa: BLE001 - 统计失败不应影响目录展示
-        logger.warning("quantdb range: 扫描 %s 失败: %s", getattr(spec, "dataset", "?"), exc)
-        bounds = {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("quantdb range: 读取快照 %s 失败: %s", path, exc)
+        return
 
-    if use_cache:
+    entries = raw.get("datasets") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        return
+    with _cache_lock:
+        for key, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            value = entry.get("value")
+            ts = entry.get("ts")
+            if isinstance(value, dict) and isinstance(ts, (int, float)):
+                _cache.setdefault(f"{root}|{key}", (float(ts), value))
+
+
+def _write_snapshot(root: Path) -> None:
+    """best-effort 落盘：失败只记日志，不影响接口。"""
+    path = _snapshot_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"updated_at": time.time(), "datasets": {}}
+        prefix = f"{root}|"
         with _cache_lock:
-            _cache[key] = (time.monotonic(), bounds)
-    return dict(bounds)
+            for key, (ts, value) in _cache.items():
+                if not key.startswith(prefix):
+                    continue
+                payload["datasets"][key[len(prefix):]] = {"ts": ts, "value": value}
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(path)
+    except OSError as exc:
+        logger.warning("quantdb range: 写入快照 %s 失败: %s", path, exc)
 
 
-def prewarm_bounds(
-    root: Path, specs: Iterable[Any], workers: int = DEFAULT_SCAN_WORKERS
-) -> None:
-    """并发预热多个数据集的区间缓存（单数据集内顺序扫，避免线程爆炸）。"""
+def dataset_time_bounds(root: Path, spec: Any) -> dict[str, Any]:
+    """只读缓存返回数据集区间；未命中或未声明 date_column 时返回 {}。"""
+    if not getattr(spec, "date_column", None):
+        return {}
+    _load_snapshot(root)
+    with _cache_lock:
+        hit = _cache.get(_cache_key(root, spec))
+    return dict(hit[1]) if hit else {}
+
+
+def _scan_specs(root: Path, specs: Iterable[Any]) -> None:
+    for spec in specs:
+        column = getattr(spec, "date_column", None)
+        if not column:
+            continue
+        try:
+            bounds = _scan_directory(root / spec.rel_dir, column)
+        except Exception as exc:  # noqa: BLE001 - 统计失败不应影响目录展示
+            logger.warning(
+                "quantdb range: 扫描 %s 失败: %s", getattr(spec, "dataset", "?"), exc
+            )
+            continue
+        key = _cache_key(root, spec)
+        with _cache_lock:
+            # 扫描失败时保留旧值，避免区间在页面上闪成空。
+            if bounds or key not in _cache:
+                _cache[key] = (time.time(), bounds)
+
+
+def refresh_bounds(root: Path, specs: Iterable[Any]) -> None:
+    """同步扫描全部数据集并落盘（供后台线程或运维脚本调用）。"""
     targets = [s for s in specs if getattr(s, "date_column", None)]
     if not targets:
         return
+    started = time.monotonic()
+    _scan_specs(root, targets)
+    _write_snapshot(root)
+    logger.info(
+        "quantdb range: 刷新 %s 个数据集区间完成，耗时 %.1fs",
+        len(targets),
+        time.monotonic() - started,
+    )
 
-    def _run(spec: Any) -> None:
+
+def prewarm_bounds(root: Path, specs: Iterable[Any], *, force: bool = False) -> bool:
+    """载入磁盘快照；过期或缺失时起后台线程刷新。永不阻塞调用方。
+
+    返回 True 表示已触发一次后台刷新（同 root 单飞，不会重复起线程）。
+    """
+    targets = [s for s in specs if getattr(s, "date_column", None)]
+    if not targets:
+        return False
+
+    _load_snapshot(root)
+    now = time.time()
+    with _cache_lock:
+        stale = force
+        if not stale:
+            for spec in targets:
+                hit = _cache.get(_cache_key(root, spec))
+                if hit is None:
+                    stale = True
+                    break
+                ttl = RANGE_CACHE_TTL_SECONDS if hit[1] else EMPTY_RANGE_RETRY_SECONDS
+                if now - hit[0] >= ttl:
+                    stale = True
+                    break
+        if not stale or str(root) in _refreshing:
+            return False
+        _refreshing.add(str(root))
+
+    def _run() -> None:
         try:
-            dataset_time_bounds(root, spec)
+            refresh_bounds(root, targets)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "quantdb range: 预热 %s 失败: %s", getattr(spec, "dataset", "?"), exc
-            )
+            logger.warning("quantdb range: 后台刷新失败: %s", exc)
+        finally:
+            with _cache_lock:
+                _refreshing.discard(str(root))
 
-    if len(targets) == 1:
-        _run(targets[0])
-        return
-    with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as pool:
-        list(pool.map(_run, targets))
+    threading.Thread(target=_run, name="quantdb-range-refresh", daemon=True).start()
+    return True
 
 
 def clear_cache() -> None:
-    """清空区间缓存（同步/发布后或测试用）。"""
+    """清空内存缓存（测试用；磁盘快照需另行删除）。"""
     with _cache_lock:
         _cache.clear()
+        _loaded_roots.clear()
+
+
+def _main() -> None:
+    """运维入口：手动刷新区间快照并打印结果。
+
+    ``python -m backend.shared.quantdb_range --data-dir /data/quantdb``
+    """
+    import argparse
+    import os
+
+    from backend.shared.quantdb_datasets import DATASETS
+
+    parser = argparse.ArgumentParser(description="刷新 QuantDB 数据集区间快照")
+    parser.add_argument(
+        "--data-dir",
+        default=os.environ.get("QM_QUANTDB_DATA_DIR", "/data/quantdb"),
+        help="QuantDB 本地数据目录",
+    )
+    args = parser.parse_args()
+
+    root = Path(args.data_dir)
+    started = time.monotonic()
+    refresh_bounds(root, DATASETS)
+    print(f"刷新完成，耗时 {time.monotonic() - started:.1f}s，快照：{_snapshot_path(root)}")
+    for spec in DATASETS:
+        bounds = dataset_time_bounds(root, spec)
+        if not bounds:
+            continue
+        print(
+            f"  {spec.dataset:<20} {bounds.get('start_date')} -> {bounds.get('end_date')}"
+            f"  files={bounds.get('covered_files')}"
+            + (f"  end_at={bounds['end_at']}" if bounds.get("end_at") else "")
+        )
+
+
+if __name__ == "__main__":
+    _main()

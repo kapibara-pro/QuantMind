@@ -140,7 +140,7 @@ def _dataset_stats(spec: DatasetSpec, root: Path) -> dict[str, Any]:
 def _build_catalog_payload() -> dict[str, Any]:
     """组装数据集目录（含落盘统计）。同步函数，由接口放入线程池执行。"""
     root = _data_dir()
-    # 区间统计要读 5000+ 个 parquet footer，先并发预热再顺序取缓存值。
+    # 区间要读 5000+ 个 parquet footer，改为读缓存 + 后台刷新，不拖慢接口。
     prewarm_bounds(root, DATASETS)
 
     items = []
@@ -186,7 +186,7 @@ async def get_catalog(current_user: dict = Depends(require_admin)):
             return _catalog_cache["payload"]
 
     try:
-        # 统计含 5000+ 次 parquet footer 读取，放线程池避免阻塞事件循环。
+        # 目录统计要遍历数万个文件，放线程池避免阻塞事件循环。
         payload = await asyncio.to_thread(_build_catalog_payload)
     except Exception as exc:  # noqa: BLE001
         logger.error("quantdb catalog failed: %s", exc, exc_info=True)
@@ -1179,7 +1179,7 @@ async def get_remote_diff(
     specs = [s for s in DATASETS if not filter_names or s.dataset in filter_names]
 
     root = _data_dir()
-    # 按标的布局的本地区间要扫 parquet footer，先并发预热，避免逐个数据集串行扫。
+    # 按标的布局的本地区间走缓存 + 后台刷新（同上，不阻塞差异比对）。
     prewarm_bounds(root, specs)
 
     items: list[dict[str, Any]] = []
