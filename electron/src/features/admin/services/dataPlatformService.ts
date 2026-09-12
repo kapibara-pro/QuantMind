@@ -277,6 +277,17 @@ export interface ThsSnapshotPreview {
     timestamp: string;
 }
 
+export interface ThsSnapshotConfig {
+    api_key_configured: boolean;
+    api_key_masked: string;
+    base_url: string;
+    snapshot_enabled: boolean;
+    symbols: string;
+    index_codes: string;
+    runtime_env_file: string;
+    timestamp: string;
+}
+
 export interface QuantDBSyncJob {
     job_id: string;
     status: 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
@@ -839,6 +850,27 @@ class DataPlatformService {
     }> {
         const resp = await this.axiosInstance.get(
             '/admin/data-platform/ths-snapshots/catalog',
+        );
+        return this.unwrap(resp);
+    }
+
+    async getThsSnapshotConfig(): Promise<ThsSnapshotConfig> {
+        const resp = await this.axiosInstance.get(
+            '/admin/data-platform/ths-snapshots/config',
+        );
+        return this.unwrap(resp);
+    }
+
+    async saveThsSnapshotConfig(payload: {
+        api_key?: string;
+        snapshot_enabled?: boolean;
+        base_url?: string;
+        symbols?: string;
+        index_codes?: string;
+    }): Promise<ThsSnapshotConfig & { verified?: boolean | null; error?: string | null }> {
+        const resp = await this.axiosInstance.post(
+            '/admin/data-platform/ths-snapshots/config',
+            payload,
         );
         return this.unwrap(resp);
     }

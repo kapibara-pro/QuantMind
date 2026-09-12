@@ -22,6 +22,7 @@ import httpx
 from sqlalchemy import text
 
 from backend.shared.stock_utils import StockCodeUtil
+from backend.shared.runtime_secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class ThsFinanceClient:
         max_retries: int | None = None,
         client: httpx.Client | None = None,
     ) -> None:
-        self.api_key = (api_key or os.getenv("HITHINK_FINANCE_API_KEY", "")).strip()
+        self.api_key = (api_key or get_secret("HITHINK_FINANCE_API_KEY")).strip()
         if not self.api_key:
             raise ThsSnapshotError("HITHINK_FINANCE_API_KEY 未配置", retryable=False)
         self.base_url = (
