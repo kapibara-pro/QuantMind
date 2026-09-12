@@ -253,6 +253,9 @@ services:
       # QuantDB 本地数据中枢（A 股优先数据源）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      # 发布回滚副本保留份数：每份约 4-5 GiB（分钟线为整文件备份），
+      # 数据盘紧张时调小可显著释放空间；1 = 仅保留最近一次发布。
+      - QM_EASY_TDX_PUBLISH_BACKUPS=${QM_EASY_TDX_PUBLISH_BACKUPS:-1}
       - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
       - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
       - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
@@ -446,6 +449,7 @@ services:
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - QM_EASY_TDX_PUBLISH_BACKUPS=${QM_EASY_TDX_PUBLISH_BACKUPS:-1}
       - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
       - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
       - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
@@ -577,6 +581,7 @@ services:
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - QM_EASY_TDX_PUBLISH_BACKUPS=${QM_EASY_TDX_PUBLISH_BACKUPS:-1}
       - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
       - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
       - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
@@ -680,6 +685,7 @@ services:
       - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       - QM_EASY_TDX_DATA_DIR=/data/easy_tdx
+      - QM_EASY_TDX_PUBLISH_BACKUPS=${QM_EASY_TDX_PUBLISH_BACKUPS:-1}
       - EASY_TDX_CONFIG_DIR=/data/easy_tdx/config
       - EASY_TDX_KNOWN_HOSTS=${EASY_TDX_KNOWN_HOSTS:-}
       - EASY_TDX_MAC_HOST=${EASY_TDX_MAC_HOST:-}
