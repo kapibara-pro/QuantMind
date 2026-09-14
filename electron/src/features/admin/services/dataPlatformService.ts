@@ -259,19 +259,15 @@ export interface ThsSnapshotPreview {
     dataset: string;
     snapshot_date?: string | null;
     rows_total: number;
-    payload_fields: string[];
-    data: Array<{
+    column_count: number;
+    columns: Array<{ name: string; dtype: string }>;
+    data: Array<Record<string, unknown> & {
         id: number;
         snapshot_date: string;
         dataset: string;
         scope_key: string;
-        symbol?: string | null;
+        extra?: Record<string, unknown>;
         as_of_ms?: number | null;
-        payload: Record<string, unknown>;
-        source_request_id?: string | null;
-        row_count: number;
-        status: string;
-        schema_version: string;
         captured_at: string;
     }>;
     timestamp: string;
@@ -842,6 +838,7 @@ class DataPlatformService {
         source: 'ths';
         storage_type: 'postgres_snapshot';
         table_ready: boolean;
+        standardized_table_ready?: boolean;
         api_key_configured: boolean;
         schedule_enabled: boolean;
         groups: ThsSnapshotGroup[];

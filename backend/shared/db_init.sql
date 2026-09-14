@@ -487,6 +487,60 @@ CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_dataset
 CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_symbol
     ON qm_ths_daily_snapshots (symbol, snapshot_date);
 
+-- 同花顺标准化明细层。原始 payload 继续保留在上表，业务预览和查询优先使用此表。
+CREATE TABLE IF NOT EXISTS qm_ths_standardized_snapshots (
+    id                          BIGSERIAL PRIMARY KEY,
+    snapshot_date               DATE NOT NULL,
+    dataset                     TEXT NOT NULL,
+    scope_key                   TEXT NOT NULL,
+    symbol                      TEXT,
+    name                        TEXT,
+    index_code                  TEXT,
+    exchange                    TEXT,
+    category                    TEXT,
+    rank                        INTEGER,
+    price                       DOUBLE PRECISION,
+    change_pct                  DOUBLE PRECISION,
+    change_amount               DOUBLE PRECISION,
+    volume                      DOUBLE PRECISION,
+    amount                      DOUBLE PRECISION,
+    turnover_pct                DOUBLE PRECISION,
+    market_cap                  DOUBLE PRECISION,
+    pe_ttm                      DOUBLE PRECISION,
+    pe_mrq                      DOUBLE PRECISION,
+    pb_mrq                      DOUBLE PRECISION,
+    ps_ttm                      DOUBLE PRECISION,
+    pcf_ttm                     DOUBLE PRECISION,
+    limit_up_count              INTEGER,
+    limit_down_count             INTEGER,
+    consecutive_limit_count      INTEGER,
+    seal_amount                 DOUBLE PRECISION,
+    sentiment_score             DOUBLE PRECISION,
+    metric_value                DOUBLE PRECISION,
+    label                       TEXT,
+    weight                      DOUBLE PRECISION,
+    as_of_ms                   BIGINT,
+    row_order                   INTEGER,
+    extra                       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    captured_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (snapshot_date, dataset, scope_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_qm_ths_standardized_dataset_date
+    ON qm_ths_standardized_snapshots (dataset, snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_qm_ths_standardized_symbol_date
+    ON qm_ths_standardized_snapshots (symbol, snapshot_date);
+
+CREATE OR REPLACE VIEW v_ths_standardized_daily AS
+SELECT snapshot_date AS trade_date, dataset, scope_key, symbol, name,
+       index_code, exchange, category, rank, price, change_pct,
+       change_amount, volume, amount, turnover_pct, market_cap,
+       pe_ttm, pe_mrq, pb_mrq, ps_ttm, pcf_ttm, limit_up_count,
+       limit_down_count, consecutive_limit_count, seal_amount,
+       sentiment_score, metric_value, label, weight, as_of_ms,
+       row_order, extra, captured_at, 'ths'::TEXT AS source
+FROM qm_ths_standardized_snapshots;
+
 -- 同花顺快照的统一查询入口。payload 保留上游原始字段，按业务域提供薄视图。
 CREATE OR REPLACE VIEW v_ths_daily_snapshot AS
 SELECT snapshot_date AS trade_date, dataset, scope_key, symbol, as_of_ms,

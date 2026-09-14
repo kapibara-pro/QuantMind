@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,88 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 DEFAULT_BASE_URL = "https://fuyao.aicubes.cn"
 SNAPSHOT_SCHEMA_VERSION = "ths_snapshot_v1"
 MARKET_SCOPE = "__market__"
+
+# The upstream APIs use slightly different names for the same concept. These
+# aliases form the stable preview contract while ``extra`` keeps unmapped data.
+STANDARD_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "symbol": ("thscode", "symbol", "ticker", "stock_code", "code"),
+    "name": ("name", "stock_name", "security_name", "index_name"),
+    "index_code": ("index_code", "indexcode", "ths_index_code"),
+    "exchange": ("exchange", "market", "market_code"),
+    "category": ("category", "category_name", "tag", "type"),
+    "rank": ("rank", "ranking", "อันดับ", "position"),
+    "price": ("price", "now", "last", "latest", "close"),
+    "change_pct": ("change_pct", "change_percent", "pct_chg", "changeRate", "涨跌幅"),
+    "change_amount": ("change", "change_amount", "price_change", "涨跌额"),
+    "volume": ("volume", "vol", "成交量"),
+    "amount": ("amount", "turnover", "成交额"),
+    "turnover_pct": ("turnover_pct", "turnover_rate", "换手率"),
+    "market_cap": ("market_cap", "market_value", "总市值", "流通市值"),
+    "pe_ttm": ("pe_ttm", "pe", "pe_ratio", "市盈率"),
+    "pe_mrq": ("pe_mrq", "pe_dynamic"),
+    "pb_mrq": ("pb_mrq", "pb", "pb_ratio", "市净率"),
+    "ps_ttm": ("ps_ttm", "ps", "ps_ratio", "市销率"),
+    "pcf_ttm": ("pcf_ttm", "pcf", "pcf_ratio", "市现率"),
+    "limit_up_count": ("limit_up_count", "up_limit_count", "涨停数"),
+    "limit_down_count": ("limit_down_count", "down_limit_count", "跌停数"),
+    "consecutive_limit_count": ("consecutive_limit_count", "limit_days", "连板数"),
+    "seal_amount": ("seal_amount", "封单金额", "封板资金"),
+    "sentiment_score": ("sentiment_score", "emotion_score", "情绪分"),
+    "metric_value": ("metric_value", "value", "ratio", "percent", "指标值"),
+    "label": ("label", "tag", "signal", "标签"),
+    "weight": ("weight", "weight_pct", "权重"),
+}
+
+STANDARD_NUMERIC_FIELDS = {
+    "price", "change_pct", "change_amount", "volume", "amount", "turnover_pct",
+    "market_cap", "pe_ttm", "pe_mrq", "pb_mrq", "ps_ttm", "pcf_ttm",
+    "seal_amount", "sentiment_score", "weight", "metric_value",
+}
+STANDARD_INTEGER_FIELDS = {
+    "rank", "limit_up_count", "limit_down_count", "consecutive_limit_count",
+}
+
+STANDARD_DATASET_COLUMNS: dict[str, tuple[str, ...]] = {
+    "ticker_catalog": ("symbol", "name", "exchange", "category"),
+    "valuation_snapshot": (
+        "symbol", "name", "price", "pe_ttm", "pe_mrq", "pb_mrq", "ps_ttm",
+        "pcf_ttm", "market_cap"
+    ),
+    "limit_up_pool": (
+        "symbol", "name", "price", "change_pct", "volume", "amount", "turnover_pct",
+        "consecutive_limit_count", "seal_amount"
+    ),
+    "limit_down_pool": (
+        "symbol", "name", "price", "change_pct", "volume", "amount", "turnover_pct"
+    ),
+    "limit_break_pool": (
+        "symbol", "name", "price", "change_pct", "volume", "amount",
+        "turnover_pct", "seal_amount"
+    ),
+    "limit_up_ladder": (
+        "symbol", "name", "price", "change_pct", "rank", "consecutive_limit_count", "amount"
+    ),
+    "anomaly_list": ("symbol", "name", "price", "change_pct", "volume", "amount", "label"),
+    "skyrocket_list": ("symbol", "name", "price", "change_pct", "rank", "label"),
+    "hot_stock_list": ("symbol", "name", "rank", "price", "change_pct", "label"),
+    "hot_stock_list_history": ("symbol", "name", "rank", "price", "change_pct", "label"),
+    "dragon_tiger_all": ("symbol", "name", "rank", "price", "change_pct", "amount", "label"),
+    "auction_snapshot": (
+        "symbol", "name", "price", "change_pct", "volume", "amount", "turnover_pct", "label"
+    ),
+    "auction_short_term_benchmark": (
+        "name", "label", "metric_value", "sentiment_score", "change_pct",
+        "limit_up_count", "limit_down_count"
+    ),
+    "index_catalog_cn_concept": ("index_code", "name", "exchange", "category"),
+    "index_catalog_industry": ("index_code", "name", "exchange", "category"),
+    "index_catalog_region": ("index_code", "name", "exchange", "category"),
+    "index_catalog_tszs": ("index_code", "name", "exchange", "category"),
+    "index_snapshot": ("index_code", "name", "price", "change_pct", "volume", "amount"),
+    "index_constituents": ("index_code", "symbol", "name", "rank", "weight"),
+}
+
+STANDARD_TABLE = "qm_ths_standardized_snapshots"
 
 
 class ThsSnapshotError(RuntimeError):
@@ -234,6 +317,73 @@ def _records(
     ]
 
 
+def _coerce_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        normalized = value.strip().replace(",", "").replace("%", "")
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    number = _coerce_number(value)
+    return int(number) if number is not None else None
+
+
+def standardize_snapshot_record(record: SnapshotRecord) -> dict[str, Any]:
+    """Map one raw response item into the stable cross-dataset schema."""
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    consumed: set[str] = set()
+    values: dict[str, Any] = {
+        "snapshot_date": record.snapshot_date,
+        "dataset": record.dataset,
+        "scope_key": record.scope_key,
+        "symbol": record.symbol,
+        "as_of_ms": record.as_of_ms,
+        "row_order": None,
+    }
+    for field, aliases in STANDARD_FIELD_ALIASES.items():
+        value = None
+        for alias in aliases:
+            if alias in payload and payload[alias] is not None:
+                value = payload[alias]
+                consumed.add(alias)
+                break
+        if field == "symbol" and record.symbol:
+            value = record.symbol
+        if field in STANDARD_NUMERIC_FIELDS:
+            value = _coerce_number(value)
+        elif field in STANDARD_INTEGER_FIELDS:
+            value = _coerce_int(value)
+        elif value is not None and not isinstance(value, (str, bool)):
+            value = str(value)
+        values[field] = value
+    if record.dataset.startswith("index_catalog_") or record.dataset == "index_snapshot":
+        if not values.get("index_code"):
+            values["index_code"] = payload.get("thscode") or payload.get("indexcode")
+        values["symbol"] = None
+    elif record.dataset == "index_constituents":
+        values["index_code"] = record.scope_key.removeprefix("index:").split(":", 1)[0]
+    values["extra"] = {
+        str(key): value for key, value in payload.items() if key not in consumed
+    }
+    return values
+
+
+def standard_columns(dataset: str) -> tuple[str, ...]:
+    """Return the ordered, user-facing columns for a dataset."""
+    return STANDARD_DATASET_COLUMNS.get(
+        dataset,
+        ("symbol", "name", "index_code", "rank", "price", "change_pct", "amount", "label"),
+    )
+
+
 class ThsSnapshotStore:
     """原始快照存储。
 
@@ -258,6 +408,45 @@ class ThsSnapshotStore:
         UNIQUE (snapshot_date, dataset, scope_key)
     )
     """
+    CREATE_STANDARD_TABLE = f"""
+    CREATE TABLE IF NOT EXISTS {STANDARD_TABLE} (
+        id BIGSERIAL PRIMARY KEY,
+        snapshot_date DATE NOT NULL,
+        dataset TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        symbol TEXT,
+        name TEXT,
+        index_code TEXT,
+        exchange TEXT,
+        category TEXT,
+        rank INTEGER,
+        price DOUBLE PRECISION,
+        change_pct DOUBLE PRECISION,
+        change_amount DOUBLE PRECISION,
+        volume DOUBLE PRECISION,
+        amount DOUBLE PRECISION,
+        turnover_pct DOUBLE PRECISION,
+        market_cap DOUBLE PRECISION,
+        pe_ttm DOUBLE PRECISION,
+        pe_mrq DOUBLE PRECISION,
+        pb_mrq DOUBLE PRECISION,
+        ps_ttm DOUBLE PRECISION,
+        pcf_ttm DOUBLE PRECISION,
+        limit_up_count INTEGER,
+        limit_down_count INTEGER,
+        consecutive_limit_count INTEGER,
+        seal_amount DOUBLE PRECISION,
+        sentiment_score DOUBLE PRECISION,
+        metric_value DOUBLE PRECISION,
+        label TEXT,
+        weight DOUBLE PRECISION,
+        as_of_ms BIGINT,
+        row_order INTEGER,
+        extra JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (snapshot_date, dataset, scope_key)
+    )
+    """
     CREATE_VIEWS = (
         """
         CREATE OR REPLACE VIEW v_ths_daily_snapshot AS
@@ -265,6 +454,17 @@ class ThsSnapshotStore:
                payload, source_request_id, row_count, status, schema_version,
                captured_at, 'ths'::TEXT AS source
         FROM qm_ths_daily_snapshots
+        """,
+        f"""
+        CREATE OR REPLACE VIEW v_ths_standardized_daily AS
+        SELECT snapshot_date AS trade_date, dataset, scope_key, symbol, name,
+               index_code, exchange, category, rank, price, change_pct,
+               change_amount, volume, amount, turnover_pct, market_cap,
+               pe_ttm, pe_mrq, pb_mrq, ps_ttm, pcf_ttm, limit_up_count,
+               limit_down_count, consecutive_limit_count, seal_amount,
+               sentiment_score, metric_value, label, weight, as_of_ms,
+               row_order, extra, captured_at, 'ths'::TEXT AS source
+        FROM {STANDARD_TABLE}
         """,
         """
         CREATE OR REPLACE VIEW v_ths_stock_selection_daily AS
@@ -299,6 +499,13 @@ class ThsSnapshotStore:
     def ensure_schema(self) -> None:
         with self.engine.begin() as connection:
             connection.execute(text(self.CREATE_TABLE))
+            connection.execute(text(self.CREATE_STANDARD_TABLE))
+            connection.execute(
+                text(
+                    f"ALTER TABLE {STANDARD_TABLE} "
+                    "ADD COLUMN IF NOT EXISTS metric_value DOUBLE PRECISION"
+                )
+            )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_date "
@@ -317,8 +524,114 @@ class ThsSnapshotStore:
                     "ON qm_ths_daily_snapshots (symbol, snapshot_date)"
                 )
             )
+            connection.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS idx_{STANDARD_TABLE}_dataset_date "
+                    f"ON {STANDARD_TABLE} (dataset, snapshot_date)"
+                )
+            )
+            connection.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS idx_{STANDARD_TABLE}_symbol_date "
+                    f"ON {STANDARD_TABLE} (symbol, snapshot_date)"
+                )
+            )
             for view_sql in self.CREATE_VIEWS:
                 connection.execute(text(view_sql))
+            for dataset in STANDARD_DATASET_COLUMNS:
+                view_name = f"v_ths_std_{re.sub(r'[^a-z0-9_]', '_', dataset.lower())}"
+                connection.execute(
+                    text(
+                        f"CREATE OR REPLACE VIEW {view_name} AS "
+                        f"SELECT * FROM {STANDARD_TABLE} "
+                        f"WHERE dataset = '{dataset}'"
+                    )
+                )
+
+        self._backfill_standardized()
+
+    def _upsert_standardized(self, records: Iterable[SnapshotRecord]) -> int:
+        rows = [standardize_snapshot_record(record) for record in records]
+        if not rows:
+            return 0
+        columns = (
+            "snapshot_date", "dataset", "scope_key", "symbol", "name", "index_code",
+            "exchange", "category", "rank", "price", "change_pct", "change_amount",
+            "volume", "amount", "turnover_pct", "market_cap", "pe_ttm", "pe_mrq",
+            "pb_mrq", "ps_ttm", "pcf_ttm", "limit_up_count", "limit_down_count",
+            "consecutive_limit_count", "seal_amount", "sentiment_score", "label", "weight",
+            "metric_value", "as_of_ms", "row_order", "extra",
+        )
+        placeholders = ", ".join(
+            f"CAST(:{column} AS JSONB)" if column == "extra" else f":{column}"
+            for column in columns
+        )
+        statement = text(
+            f"""
+            INSERT INTO {STANDARD_TABLE} ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT (snapshot_date, dataset, scope_key) DO UPDATE SET
+              symbol = EXCLUDED.symbol, name = EXCLUDED.name,
+              index_code = EXCLUDED.index_code, exchange = EXCLUDED.exchange,
+              category = EXCLUDED.category, rank = EXCLUDED.rank,
+              price = EXCLUDED.price, change_pct = EXCLUDED.change_pct,
+              change_amount = EXCLUDED.change_amount, volume = EXCLUDED.volume,
+              amount = EXCLUDED.amount, turnover_pct = EXCLUDED.turnover_pct,
+              market_cap = EXCLUDED.market_cap, pe_ttm = EXCLUDED.pe_ttm,
+              pe_mrq = EXCLUDED.pe_mrq, pb_mrq = EXCLUDED.pb_mrq,
+              ps_ttm = EXCLUDED.ps_ttm, pcf_ttm = EXCLUDED.pcf_ttm,
+              limit_up_count = EXCLUDED.limit_up_count,
+              limit_down_count = EXCLUDED.limit_down_count,
+              consecutive_limit_count = EXCLUDED.consecutive_limit_count,
+              seal_amount = EXCLUDED.seal_amount,
+              sentiment_score = EXCLUDED.sentiment_score,
+              metric_value = EXCLUDED.metric_value,
+              label = EXCLUDED.label, weight = EXCLUDED.weight,
+              as_of_ms = EXCLUDED.as_of_ms, row_order = EXCLUDED.row_order,
+              extra = EXCLUDED.extra, captured_at = NOW()
+            """
+        )
+        params = [
+            {**row, "extra": json.dumps(row["extra"], ensure_ascii=False, separators=(",", ":"))}
+            for row in rows
+        ]
+        with self.engine.begin() as connection:
+            connection.execute(statement, params)
+        return len(rows)
+
+    def _backfill_standardized(self) -> None:
+        """Make deployments with existing raw snapshots immediately previewable."""
+        with self.engine.begin() as connection:
+            raw_rows = connection.execute(
+                text(
+                    f"""
+                    SELECT r.snapshot_date, r.dataset, r.scope_key, r.symbol,
+                           r.as_of_ms, r.payload
+                    FROM qm_ths_daily_snapshots r
+                    LEFT JOIN {STANDARD_TABLE} n
+                      ON n.snapshot_date = r.snapshot_date
+                     AND n.dataset = r.dataset
+                     AND n.scope_key = r.scope_key
+                    WHERE n.id IS NULL
+                    """
+                )
+            ).mappings().all()
+        if not raw_rows:
+            return
+        records = [
+            SnapshotRecord(
+                snapshot_date=row["snapshot_date"],
+                dataset=row["dataset"],
+                scope_key=row["scope_key"],
+                symbol=row["symbol"],
+                as_of_ms=row["as_of_ms"],
+                payload=row["payload"] or {},
+                request_id=None,
+                row_count=0,
+            )
+            for row in raw_rows
+        ]
+        self._upsert_standardized(records)
 
     def upsert(self, records: Iterable[SnapshotRecord]) -> int:
         rows = list(records)
@@ -360,6 +673,7 @@ class ThsSnapshotStore:
         ]
         with self.engine.begin() as connection:
             connection.execute(statement, params)
+        self._upsert_standardized(rows)
         return len(rows)
 
 

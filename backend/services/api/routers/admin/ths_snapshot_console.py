@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.services.api.user_app.middleware.auth import require_admin
+from backend.services.engine.data_platform.ths_snapshots import STANDARD_TABLE, standard_columns
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.runtime_secrets import get_secret, mask_secret, runtime_env_path, set_secret
 from backend.shared.stock_utils import StockCodeUtil
@@ -144,6 +145,17 @@ THS_DATASETS: tuple[dict[str, str], ...] = (
 )
 
 _DATASET_NAMES = {item["dataset"] for item in THS_DATASETS}
+
+STANDARD_COLUMN_TYPES: dict[str, str] = {
+    "symbol": "string", "name": "string", "index_code": "string",
+    "exchange": "string", "category": "string", "label": "string",
+    "rank": "int", "limit_up_count": "int", "limit_down_count": "int",
+    "consecutive_limit_count": "int", "price": "float", "change_pct": "float",
+    "change_amount": "float", "volume": "float", "amount": "float",
+    "turnover_pct": "float", "market_cap": "float", "pe_ttm": "float",
+    "pe_mrq": "float", "pb_mrq": "float", "ps_ttm": "float", "pcf_ttm": "float",
+    "seal_amount": "float", "sentiment_score": "float", "metric_value": "float", "weight": "float",
+}
 
 
 def _now_iso() -> str:
@@ -325,11 +337,19 @@ async def _snapshot_table_exists(session: Any) -> bool:
     return bool(result.scalar())
 
 
+async def _standardized_table_exists(session: Any) -> bool:
+    result = await session.execute(
+        text("SELECT to_regclass('public.qm_ths_standardized_snapshots') IS NOT NULL")
+    )
+    return bool(result.scalar())
+
+
 @router.get("/catalog")
 async def get_ths_snapshot_catalog() -> dict[str, Any]:
     """返回固定数据集目录及 PostgreSQL 中的实际历史覆盖情况。"""
     async with get_session(read_only=True) as session:
         table_exists = await _snapshot_table_exists(session)
+        standardized_table_exists = await _standardized_table_exists(session)
         stats: dict[str, dict[str, Any]] = {}
         if table_exists:
             result = await session.execute(
@@ -395,6 +415,7 @@ async def get_ths_snapshot_catalog() -> dict[str, Any]:
             "source": "ths",
             "storage_type": "postgres_snapshot",
             "table_ready": table_exists,
+            "standardized_table_ready": standardized_table_exists,
             "api_key_configured": bool(get_secret("HITHINK_FINANCE_API_KEY")),
             "schedule_enabled": os.getenv(
                 "HITHINK_FINANCE_SNAPSHOT_ENABLED", "false"
@@ -414,21 +435,27 @@ async def preview_ths_snapshot(
     symbol: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
-    """预览指定数据集最近或指定日期的原始 JSONB 快照。"""
+    """预览标准化快照；原始 JSONB 只作为追溯层保存。"""
     if dataset not in _DATASET_NAMES:
         raise HTTPException(
             status_code=400, detail=f"未知同花顺数据集: {dataset}"
         )
 
+    columns = list(standard_columns(dataset))
+    column_meta = [
+        {"name": column, "dtype": STANDARD_COLUMN_TYPES.get(column, "string")}
+        for column in columns
+    ]
     async with get_session(read_only=True) as session:
-        if not await _snapshot_table_exists(session):
+        if not await _standardized_table_exists(session):
             return {
                 "success": True,
                 "data": {
                     "dataset": dataset,
                     "snapshot_date": snapshot_date,
                     "rows_total": 0,
-                    "payload_fields": [],
+                    "column_count": len(columns),
+                    "columns": column_meta,
                     "data": [],
                     "timestamp": _now_iso(),
                 },
@@ -439,7 +466,7 @@ async def preview_ths_snapshot(
             target_date = (
                 await session.execute(
                     text(
-                        "SELECT MAX(snapshot_date) FROM qm_ths_daily_snapshots "
+                        f"SELECT MAX(snapshot_date) FROM {STANDARD_TABLE} "
                         "WHERE dataset = :dataset"
                     ),
                     {"dataset": dataset},
@@ -456,26 +483,27 @@ async def preview_ths_snapshot(
             raw_symbol = symbol.strip()
             normalized = StockCodeUtil.to_prefix(raw_symbol)
             conditions.append(
-                "(symbol = :symbol OR scope_key ILIKE :search "
-                "OR payload->>'thscode' ILIKE :search "
-                "OR payload->>'name' ILIKE :search)"
+                "(symbol = :symbol OR name ILIKE :search OR index_code ILIKE :search "
+                "OR scope_key ILIKE :search)"
             )
             params["symbol"] = normalized
             params["search"] = f"%{raw_symbol}%"
         where = " AND ".join(conditions)
 
         count_result = await session.execute(
-            text(f"SELECT COUNT(*) FROM qm_ths_daily_snapshots WHERE {where}"),
+            text(f"SELECT COUNT(*) FROM {STANDARD_TABLE} WHERE {where}"),
             params,
         )
         rows_total = int(count_result.scalar() or 0)
+        selected = [
+            "id", "snapshot_date", "dataset", "scope_key", "as_of_ms", "captured_at", "extra",
+            *columns,
+        ]
         rows_result = await session.execute(
             text(
                 f"""
-                SELECT id, snapshot_date, dataset, scope_key, symbol, as_of_ms,
-                       payload, source_request_id, row_count, status,
-                       schema_version, captured_at
-                FROM qm_ths_daily_snapshots
+                SELECT {', '.join(dict.fromkeys(selected))}
+                FROM {STANDARD_TABLE}
                 WHERE {where}
                 ORDER BY symbol NULLS LAST, scope_key, id
                 LIMIT :limit
@@ -485,21 +513,14 @@ async def preview_ths_snapshot(
         )
         rows = [dict(row) for row in rows_result.mappings().all()]
 
-    payload_fields = sorted(
-        {
-            str(key)
-            for row in rows
-            if isinstance(row.get("payload"), dict)
-            for key in row["payload"]
-        }
-    )
     return {
         "success": True,
         "data": {
             "dataset": dataset,
             "snapshot_date": target_date,
             "rows_total": rows_total,
-            "payload_fields": payload_fields,
+            "column_count": len(columns),
+            "columns": column_meta,
             "data": rows,
             "timestamp": _now_iso(),
         },

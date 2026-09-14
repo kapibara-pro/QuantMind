@@ -11,6 +11,7 @@ from backend.services.engine.data_platform.ths_snapshots import (
     ThsSnapshotError,
     ThsDailySnapshotCollector,
     _records,
+    standardize_snapshot_record,
 )
 
 
@@ -98,6 +99,40 @@ def test_client_requires_key_and_rejects_non_api_path(monkeypatch: pytest.Monkey
     client = ThsFinanceClient(api_key="test-key")
     with pytest.raises(ThsSnapshotError, match="非法同花顺路径"):
         client.get("/docs")
+
+
+def test_standardize_snapshot_record_keeps_unknown_fields_in_extra() -> None:
+    record = _records(
+        snapshot_date=date(2026, 9, 7),
+        dataset="valuation_snapshot",
+        body={
+            "data": {
+                "item": [{
+                    "thscode": "600519.SH",
+                    "name": "贵州茅台",
+                    "pe_ttm": "20.5",
+                    "pb": 12.1,
+                    "vendor_only": "kept",
+                }]
+            }
+        },
+    )[0]
+    normalized = standardize_snapshot_record(record)
+    assert normalized["symbol"] == "SH600519"
+    assert normalized["pe_ttm"] == 20.5
+    assert normalized["pb_mrq"] == 12.1
+    assert normalized["extra"] == {"vendor_only": "kept"}
+
+
+def test_standardize_index_catalog_uses_index_code() -> None:
+    record = _records(
+        snapshot_date=date(2026, 9, 7),
+        dataset="index_catalog_industry",
+        body={"data": {"item": [{"thscode": "886042.TI", "name": "示例板块"}]}},
+    )[0]
+    normalized = standardize_snapshot_record(record)
+    assert normalized["symbol"] is None
+    assert normalized["index_code"] == "886042.TI"
 
 
 def test_daily_collector_is_idempotent_at_store_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
