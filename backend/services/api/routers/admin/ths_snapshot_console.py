@@ -507,12 +507,19 @@ async def preview_ths_snapshot(
             "id", "snapshot_date", "dataset", "scope_key", "as_of_ms", "captured_at", "extra",
             *columns,
         ]
-        order_by = (
-            "event_date DESC NULLS LAST, board_num DESC NULLS LAST, "
-            "row_order NULLS LAST, symbol NULLS LAST"
-            if dataset == "limit_up_ladder"
-            else "row_order NULLS LAST, symbol NULLS LAST, scope_key, id"
-        )
+        if dataset == "limit_up_ladder":
+            order_by = (
+                "event_date DESC NULLS LAST, board_num DESC NULLS LAST, "
+                "row_order NULLS LAST, symbol NULLS LAST"
+            )
+        elif dataset in {
+            "hot_stock_list",
+            "hot_stock_list_history",
+            "skyrocket_list",
+        }:
+            order_by = "rank ASC NULLS LAST, symbol NULLS LAST"
+        else:
+            order_by = "row_order NULLS LAST, symbol NULLS LAST, scope_key, id"
         rows_result = await session.execute(
             text(
                 f"""
