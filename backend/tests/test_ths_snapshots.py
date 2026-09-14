@@ -11,7 +11,9 @@ from backend.services.engine.data_platform.ths_snapshots import (
     ThsSnapshotError,
     ThsDailySnapshotCollector,
     _records,
+    standard_columns,
     standardize_snapshot_record,
+    standardize_snapshot_records,
 )
 
 
@@ -133,6 +135,173 @@ def test_standardize_index_catalog_uses_index_code() -> None:
     normalized = standardize_snapshot_record(record)
     assert normalized["symbol"] is None
     assert normalized["index_code"] == "886042.TI"
+
+
+def test_standardize_hot_stock_uses_ranking_metrics() -> None:
+    record = _records(
+        snapshot_date=date(2026, 9, 11),
+        dataset="hot_stock_list",
+        body={
+            "data": {
+                "item": [{
+                    "thscode": "600519.SH",
+                    "name": "贵州茅台",
+                    "rank": 3,
+                    "heat": 9821.5,
+                    "rank_change": -2,
+                    "rank_trend": "down",
+                }]
+            }
+        },
+    )[0]
+
+    normalized = standardize_snapshot_record(record)
+    assert standard_columns("hot_stock_list") == (
+        "symbol", "name", "rank", "heat", "rank_change", "rank_trend"
+    )
+    assert normalized["heat"] == 9821.5
+    assert normalized["rank_change"] == -2
+    assert normalized["rank_trend"] == "down"
+    assert normalized["extra"] == {}
+
+
+def test_standardize_auction_fields_and_tags() -> None:
+    auction = _records(
+        snapshot_date=date(2026, 9, 11),
+        dataset="auction_snapshot",
+        body={
+            "data": {
+                "item": [{
+                    "thscode": "002912.SZ",
+                    "name": "新雷能",
+                    "auction_price": 20.12,
+                    "auction_pct": 3.5,
+                    "auction_volume": 1200,
+                    "auction_amount": 2414400,
+                    "auction_unmatched": 200,
+                    "auction_turnover_pct": 0.8,
+                    "auction_volume_ratio": 2.1,
+                    "auction_yesterday_ratio_pct": 130,
+                    "pre_close_price": 19.44,
+                    "open_price": 20.12,
+                    "last_price": 20.3,
+                    "float_market_cap": 1000000000,
+                }]
+            }
+        },
+    )[0]
+    normalized = standardize_snapshot_record(auction)
+    assert normalized["symbol"] == "SZ002912"
+    assert normalized["auction_price"] == 20.12
+    assert normalized["auction_volume_ratio"] == 2.1
+    assert normalized["pre_close_price"] == 19.44
+
+    benchmark = _records(
+        snapshot_date=date(2026, 9, 11),
+        dataset="auction_short_term_benchmark",
+        body={
+            "data": {
+                "item": [{
+                    "thscode": "002912.SZ",
+                    "name": "新雷能",
+                    "auction_pct": 3.5,
+                    "tags": ["强势", "高开"],
+                }]
+            }
+        },
+    )[0]
+    benchmark_row = standardize_snapshot_record(benchmark)
+    assert benchmark_row["tags"] == ["强势", "高开"]
+    assert benchmark_row["extra"] == {}
+
+
+def test_standardize_limit_up_ladder_expands_each_stock() -> None:
+    record = SnapshotRecord(
+        snapshot_date=date(2026, 9, 12),
+        dataset="limit_up_ladder",
+        scope_key=MARKET_SCOPE,
+        symbol=None,
+        as_of_ms=123,
+        payload={
+            "date": "2026-09-11",
+            "boards": {
+                "two_board": [
+                    {
+                        "name": "新雷能",
+                        "ticker": "002912",
+                        "thscode": "002912.SZ",
+                        "board_num": 2,
+                        "sign_level": 0,
+                        "seal_nextday": True,
+                    }
+                ],
+                "three_board": [
+                    {
+                        "name": "示例股票",
+                        "ticker": "600001",
+                        "thscode": "600001.SH",
+                        "board_num": 3,
+                        "sign_level": 1,
+                        "seal_nextday": False,
+                    }
+                ],
+            },
+        },
+        request_id="ladder",
+        row_count=30,
+    )
+
+    rows = standardize_snapshot_records(record)
+    assert len(rows) == 2
+    assert rows[0]["event_date"] == date(2026, 9, 11)
+    assert rows[0]["board_name"] == "two_board"
+    assert rows[0]["board_num"] == 2
+    assert rows[0]["symbol"] == "SZ002912"
+    assert rows[0]["sign_level"] == 0
+    assert rows[0]["seal_nextday"] is True
+    assert rows[0]["scope_key"] == "ladder:2026-09-11:two_board:SZ002912"
+    assert rows[1]["row_order"] == 1
+
+
+def test_standardize_wrapped_items_and_skip_empty_wrappers() -> None:
+    wrapped = SnapshotRecord(
+        snapshot_date=date(2026, 9, 12),
+        dataset="limit_down_pool",
+        scope_key=MARKET_SCOPE,
+        symbol=None,
+        as_of_ms=None,
+        payload={
+            "timestamp": 123,
+            "item": [{
+                "thscode": "600001.SH",
+                "name": "示例股票",
+                "last_price": 9.9,
+                "price_change_ratio_pct": -10,
+                "turnover_ratio_pct": 2.5,
+            }],
+        },
+        request_id=None,
+        row_count=1,
+    )
+    rows = standardize_snapshot_records(wrapped)
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "SH600001"
+    assert rows[0]["price"] == 9.9
+    assert rows[0]["change_pct"] == -10
+    assert rows[0]["turnover_pct"] == 2.5
+    assert rows[0]["as_of_ms"] == 123
+
+    empty = SnapshotRecord(
+        snapshot_date=wrapped.snapshot_date,
+        dataset="limit_down_pool",
+        scope_key=MARKET_SCOPE,
+        symbol=None,
+        as_of_ms=None,
+        payload={"item": []},
+        request_id=None,
+        row_count=0,
+    )
+    assert standardize_snapshot_records(empty) == []
 
 
 def test_daily_collector_is_idempotent_at_store_boundary(monkeypatch: pytest.MonkeyPatch) -> None:

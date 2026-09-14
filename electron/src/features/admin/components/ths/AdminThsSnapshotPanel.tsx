@@ -50,6 +50,13 @@ const STANDARD_COLUMN_LABELS: Record<string, string> = {
     pcf_ttm: '市现率TTM', limit_up_count: '涨停数', limit_down_count: '跌停数',
     consecutive_limit_count: '连板数', seal_amount: '封单金额', sentiment_score: '情绪分',
     label: '标签', weight: '权重', metric_value: '指标值',
+    event_date: '业务日期', heat: '热度', rank_change: '排名变化', rank_trend: '排名趋势',
+    board_name: '板位', board_num: '连板数', sign_level: '晋级信号', seal_nextday: '次日封板',
+    auction_price: '竞价价格', auction_pct: '竞价涨跌幅', auction_volume: '竞价成交量',
+    auction_amount: '竞价成交额', auction_turnover_pct: '竞价换手率',
+    auction_unmatched: '未匹配量', auction_volume_ratio: '竞价量比',
+    auction_yesterday_ratio_pct: '较昨日成交量', float_market_cap: '流通市值',
+    last_price: '最新价', open_price: '开盘价', pre_close_price: '昨收价', tags: '标签',
 };
 
 function formatStandardValue(value: unknown): React.ReactNode {
@@ -58,6 +65,12 @@ function formatStandardValue(value: unknown): React.ReactNode {
     }
     if (typeof value === 'number') {
         return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(4);
+    }
+    if (typeof value === 'boolean') {
+        return value ? '是' : '否';
+    }
+    if (typeof value === 'object') {
+        return JSON.stringify(value);
     }
     return String(value);
 }

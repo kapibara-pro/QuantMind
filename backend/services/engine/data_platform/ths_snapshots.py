@@ -40,13 +40,18 @@ STANDARD_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "index_code": ("index_code", "indexcode", "ths_index_code"),
     "exchange": ("exchange", "market", "market_code"),
     "category": ("category", "category_name", "tag", "type"),
-    "rank": ("rank", "ranking", "อันดับ", "position"),
-    "price": ("price", "now", "last", "latest", "close"),
-    "change_pct": ("change_pct", "change_percent", "pct_chg", "changeRate", "涨跌幅"),
+    "rank": ("rank", "ranking", "อันดับ", "position", "hot_rank"),
+    "price": ("price", "now", "last", "latest", "close", "last_price"),
+    "change_pct": (
+        "change_pct", "change_percent", "pct_chg", "changeRate", "涨跌幅",
+        "price_change_ratio_pct",
+    ),
     "change_amount": ("change", "change_amount", "price_change", "涨跌额"),
     "volume": ("volume", "vol", "成交量"),
     "amount": ("amount", "turnover", "成交额"),
-    "turnover_pct": ("turnover_pct", "turnover_rate", "换手率"),
+    "turnover_pct": (
+        "turnover_pct", "turnover_rate", "换手率", "turnover_ratio_pct",
+    ),
     "market_cap": ("market_cap", "market_value", "总市值", "流通市值"),
     "pe_ttm": ("pe_ttm", "pe", "pe_ratio", "市盈率"),
     "pe_mrq": ("pe_mrq", "pe_dynamic"),
@@ -55,22 +60,55 @@ STANDARD_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "pcf_ttm": ("pcf_ttm", "pcf", "pcf_ratio", "市现率"),
     "limit_up_count": ("limit_up_count", "up_limit_count", "涨停数"),
     "limit_down_count": ("limit_down_count", "down_limit_count", "跌停数"),
-    "consecutive_limit_count": ("consecutive_limit_count", "limit_days", "连板数"),
-    "seal_amount": ("seal_amount", "封单金额", "封板资金"),
+    "consecutive_limit_count": (
+        "consecutive_limit_count", "limit_days", "连板数", "continue_day_cnt",
+    ),
+    "seal_amount": ("seal_amount", "封单金额", "封板资金", "seal_money"),
     "sentiment_score": ("sentiment_score", "emotion_score", "情绪分"),
     "metric_value": ("metric_value", "value", "ratio", "percent", "指标值"),
-    "label": ("label", "tag", "signal", "标签"),
+    "label": (
+        "label", "tag", "signal", "标签", "tag_name", "limit_up_reason",
+        "limit_reason",
+    ),
     "weight": ("weight", "weight_pct", "权重"),
+    "event_date": ("event_date", "date", "trade_date"),
+    "heat": ("heat",),
+    "rank_change": ("rank_change",),
+    "rank_trend": ("rank_trend",),
+    "board_name": ("board_name",),
+    "board_num": ("board_num",),
+    "sign_level": ("sign_level",),
+    "seal_nextday": ("seal_nextday",),
+    "auction_price": ("auction_price",),
+    "auction_pct": ("auction_pct",),
+    "auction_volume": ("auction_volume",),
+    "auction_amount": ("auction_amount",),
+    "auction_turnover_pct": ("auction_turnover_pct",),
+    "auction_unmatched": ("auction_unmatched",),
+    "auction_volume_ratio": ("auction_volume_ratio",),
+    "auction_yesterday_ratio_pct": ("auction_yesterday_ratio_pct",),
+    "float_market_cap": ("float_market_cap",),
+    "last_price": ("last_price",),
+    "open_price": ("open_price",),
+    "pre_close_price": ("pre_close_price",),
+    "tags": ("tags",),
 }
 
 STANDARD_NUMERIC_FIELDS = {
     "price", "change_pct", "change_amount", "volume", "amount", "turnover_pct",
     "market_cap", "pe_ttm", "pe_mrq", "pb_mrq", "ps_ttm", "pcf_ttm",
     "seal_amount", "sentiment_score", "weight", "metric_value",
+    "heat", "auction_price", "auction_pct", "auction_volume", "auction_amount",
+    "auction_turnover_pct", "auction_unmatched", "auction_volume_ratio",
+    "auction_yesterday_ratio_pct", "float_market_cap", "last_price", "open_price",
+    "pre_close_price",
 }
 STANDARD_INTEGER_FIELDS = {
     "rank", "limit_up_count", "limit_down_count", "consecutive_limit_count",
+    "rank_change", "board_num", "sign_level",
 }
+STANDARD_BOOLEAN_FIELDS = {"seal_nextday"}
+STANDARD_JSON_FIELDS = {"tags"}
 
 STANDARD_DATASET_COLUMNS: dict[str, tuple[str, ...]] = {
     "ticker_catalog": ("symbol", "name", "exchange", "category"),
@@ -90,20 +128,21 @@ STANDARD_DATASET_COLUMNS: dict[str, tuple[str, ...]] = {
         "turnover_pct", "seal_amount"
     ),
     "limit_up_ladder": (
-        "symbol", "name", "price", "change_pct", "rank", "consecutive_limit_count", "amount"
+        "event_date", "board_name", "board_num", "symbol", "name", "sign_level",
+        "seal_nextday"
     ),
     "anomaly_list": ("symbol", "name", "price", "change_pct", "volume", "amount", "label"),
-    "skyrocket_list": ("symbol", "name", "price", "change_pct", "rank", "label"),
-    "hot_stock_list": ("symbol", "name", "rank", "price", "change_pct", "label"),
-    "hot_stock_list_history": ("symbol", "name", "rank", "price", "change_pct", "label"),
+    "skyrocket_list": ("symbol", "name", "rank", "heat", "rank_change", "rank_trend"),
+    "hot_stock_list": ("symbol", "name", "rank", "heat", "rank_change", "rank_trend"),
+    "hot_stock_list_history": ("symbol", "name", "rank"),
     "dragon_tiger_all": ("symbol", "name", "rank", "price", "change_pct", "amount", "label"),
     "auction_snapshot": (
-        "symbol", "name", "price", "change_pct", "volume", "amount", "turnover_pct", "label"
+        "symbol", "name", "auction_price", "auction_pct", "auction_volume",
+        "auction_amount", "auction_unmatched", "auction_turnover_pct",
+        "auction_yesterday_ratio_pct", "auction_volume_ratio", "pre_close_price",
+        "open_price", "last_price", "float_market_cap"
     ),
-    "auction_short_term_benchmark": (
-        "name", "label", "metric_value", "sentiment_score", "change_pct",
-        "limit_up_count", "limit_down_count"
-    ),
+    "auction_short_term_benchmark": ("symbol", "name", "auction_pct", "tags"),
     "index_catalog_cn_concept": ("index_code", "name", "exchange", "category"),
     "index_catalog_industry": ("index_code", "name", "exchange", "category"),
     "index_catalog_region": ("index_code", "name", "exchange", "category"),
@@ -336,6 +375,31 @@ def _coerce_int(value: Any) -> int | None:
     return int(number) if number is not None else None
 
 
+def _coerce_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _coerce_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def standardize_snapshot_record(record: SnapshotRecord) -> dict[str, Any]:
     """Map one raw response item into the stable cross-dataset schema."""
     payload = record.payload if isinstance(record.payload, dict) else {}
@@ -361,6 +425,12 @@ def standardize_snapshot_record(record: SnapshotRecord) -> dict[str, Any]:
             value = _coerce_number(value)
         elif field in STANDARD_INTEGER_FIELDS:
             value = _coerce_int(value)
+        elif field in STANDARD_BOOLEAN_FIELDS:
+            value = _coerce_bool(value)
+        elif field == "event_date":
+            value = _coerce_date(value)
+        elif field in STANDARD_JSON_FIELDS:
+            value = value if isinstance(value, (dict, list)) else None
         elif value is not None and not isinstance(value, (str, bool)):
             value = str(value)
         values[field] = value
@@ -374,6 +444,74 @@ def standardize_snapshot_record(record: SnapshotRecord) -> dict[str, Any]:
         str(key): value for key, value in payload.items() if key not in consumed
     }
     return values
+
+
+def standardize_snapshot_records(record: SnapshotRecord) -> list[dict[str, Any]]:
+    """Expand one raw record into zero or more standardized business rows."""
+    payload = record.payload if isinstance(record.payload, dict) else {}
+
+    if record.dataset == "limit_up_ladder":
+        boards = payload.get("boards")
+        if not isinstance(boards, dict):
+            return []
+        event_date = _coerce_date(payload.get("date"))
+        rows: list[dict[str, Any]] = []
+        row_order = 0
+        for board_name, stocks in boards.items():
+            if not isinstance(stocks, list):
+                continue
+            for index, stock in enumerate(stocks):
+                if not isinstance(stock, dict):
+                    continue
+                symbol = _item_symbol(stock)
+                item_key = symbol or str(index)
+                child = SnapshotRecord(
+                    snapshot_date=record.snapshot_date,
+                    dataset=record.dataset,
+                    scope_key=(
+                        f"ladder:{event_date or record.snapshot_date}:"
+                        f"{board_name}:{item_key}"
+                    ),
+                    symbol=symbol,
+                    as_of_ms=record.as_of_ms,
+                    payload={
+                        **stock,
+                        "event_date": event_date,
+                        "board_name": board_name,
+                    },
+                    request_id=record.request_id,
+                    row_count=record.row_count,
+                )
+                normalized = standardize_snapshot_record(child)
+                normalized["row_order"] = row_order
+                rows.append(normalized)
+                row_order += 1
+        return rows
+
+    items = payload.get("item")
+    if isinstance(items, list):
+        rows = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                item = {"value": item}
+            symbol = _item_symbol(item)
+            item_key = symbol or _fallback_scope(item, index)
+            child = SnapshotRecord(
+                snapshot_date=record.snapshot_date,
+                dataset=record.dataset,
+                scope_key=item_key,
+                symbol=symbol,
+                as_of_ms=record.as_of_ms or _as_ms(payload.get("timestamp")),
+                payload=item,
+                request_id=record.request_id,
+                row_count=len(items),
+            )
+            normalized = standardize_snapshot_record(child)
+            normalized["row_order"] = index
+            rows.append(normalized)
+        return rows
+
+    return [standardize_snapshot_record(record)]
 
 
 def standard_columns(dataset: str) -> tuple[str, ...]:
@@ -440,6 +578,27 @@ class ThsSnapshotStore:
         metric_value DOUBLE PRECISION,
         label TEXT,
         weight DOUBLE PRECISION,
+        event_date DATE,
+        heat DOUBLE PRECISION,
+        rank_change INTEGER,
+        rank_trend TEXT,
+        board_name TEXT,
+        board_num INTEGER,
+        sign_level INTEGER,
+        seal_nextday BOOLEAN,
+        auction_price DOUBLE PRECISION,
+        auction_pct DOUBLE PRECISION,
+        auction_volume DOUBLE PRECISION,
+        auction_amount DOUBLE PRECISION,
+        auction_turnover_pct DOUBLE PRECISION,
+        auction_unmatched DOUBLE PRECISION,
+        auction_volume_ratio DOUBLE PRECISION,
+        auction_yesterday_ratio_pct DOUBLE PRECISION,
+        float_market_cap DOUBLE PRECISION,
+        last_price DOUBLE PRECISION,
+        open_price DOUBLE PRECISION,
+        pre_close_price DOUBLE PRECISION,
+        tags JSONB,
         as_of_ms BIGINT,
         row_order INTEGER,
         extra JSONB NOT NULL DEFAULT '{{}}'::jsonb,
@@ -463,7 +622,13 @@ class ThsSnapshotStore:
                pe_ttm, pe_mrq, pb_mrq, ps_ttm, pcf_ttm, limit_up_count,
                limit_down_count, consecutive_limit_count, seal_amount,
                sentiment_score, metric_value, label, weight, as_of_ms,
-               row_order, extra, captured_at, 'ths'::TEXT AS source
+               row_order, extra, captured_at, 'ths'::TEXT AS source,
+               event_date, heat, rank_change, rank_trend, board_name,
+               board_num, sign_level, seal_nextday, auction_price,
+               auction_pct, auction_volume, auction_amount,
+               auction_turnover_pct, auction_unmatched, auction_volume_ratio,
+               auction_yesterday_ratio_pct, float_market_cap, last_price,
+               open_price, pre_close_price, tags
         FROM {STANDARD_TABLE}
         """,
         """
@@ -500,12 +665,37 @@ class ThsSnapshotStore:
         with self.engine.begin() as connection:
             connection.execute(text(self.CREATE_TABLE))
             connection.execute(text(self.CREATE_STANDARD_TABLE))
-            connection.execute(
-                text(
-                    f"ALTER TABLE {STANDARD_TABLE} "
-                    "ADD COLUMN IF NOT EXISTS metric_value DOUBLE PRECISION"
-                )
+            standard_columns_ddl = (
+                "metric_value DOUBLE PRECISION",
+                "event_date DATE",
+                "heat DOUBLE PRECISION",
+                "rank_change INTEGER",
+                "rank_trend TEXT",
+                "board_name TEXT",
+                "board_num INTEGER",
+                "sign_level INTEGER",
+                "seal_nextday BOOLEAN",
+                "auction_price DOUBLE PRECISION",
+                "auction_pct DOUBLE PRECISION",
+                "auction_volume DOUBLE PRECISION",
+                "auction_amount DOUBLE PRECISION",
+                "auction_turnover_pct DOUBLE PRECISION",
+                "auction_unmatched DOUBLE PRECISION",
+                "auction_volume_ratio DOUBLE PRECISION",
+                "auction_yesterday_ratio_pct DOUBLE PRECISION",
+                "float_market_cap DOUBLE PRECISION",
+                "last_price DOUBLE PRECISION",
+                "open_price DOUBLE PRECISION",
+                "pre_close_price DOUBLE PRECISION",
+                "tags JSONB",
             )
+            for column_ddl in standard_columns_ddl:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {STANDARD_TABLE} "
+                        f"ADD COLUMN IF NOT EXISTS {column_ddl}"
+                    )
+                )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_qm_ths_snapshot_date "
@@ -551,7 +741,11 @@ class ThsSnapshotStore:
         self._backfill_standardized()
 
     def _upsert_standardized(self, records: Iterable[SnapshotRecord]) -> int:
-        rows = [standardize_snapshot_record(record) for record in records]
+        rows = [
+            row
+            for record in records
+            for row in standardize_snapshot_records(record)
+        ]
         if not rows:
             return 0
         columns = (
@@ -560,10 +754,17 @@ class ThsSnapshotStore:
             "volume", "amount", "turnover_pct", "market_cap", "pe_ttm", "pe_mrq",
             "pb_mrq", "ps_ttm", "pcf_ttm", "limit_up_count", "limit_down_count",
             "consecutive_limit_count", "seal_amount", "sentiment_score", "label", "weight",
-            "metric_value", "as_of_ms", "row_order", "extra",
+            "metric_value", "event_date", "heat", "rank_change", "rank_trend",
+            "board_name", "board_num", "sign_level", "seal_nextday", "auction_price",
+            "auction_pct", "auction_volume", "auction_amount", "auction_turnover_pct",
+            "auction_unmatched", "auction_volume_ratio", "auction_yesterday_ratio_pct",
+            "float_market_cap", "last_price", "open_price", "pre_close_price", "tags",
+            "as_of_ms", "row_order", "extra",
         )
         placeholders = ", ".join(
-            f"CAST(:{column} AS JSONB)" if column == "extra" else f":{column}"
+            f"CAST(:{column} AS JSONB)"
+            if column in {"extra", "tags"}
+            else f":{column}"
             for column in columns
         )
         statement = text(
@@ -587,12 +788,37 @@ class ThsSnapshotStore:
               sentiment_score = EXCLUDED.sentiment_score,
               metric_value = EXCLUDED.metric_value,
               label = EXCLUDED.label, weight = EXCLUDED.weight,
+              event_date = EXCLUDED.event_date, heat = EXCLUDED.heat,
+              rank_change = EXCLUDED.rank_change, rank_trend = EXCLUDED.rank_trend,
+              board_name = EXCLUDED.board_name, board_num = EXCLUDED.board_num,
+              sign_level = EXCLUDED.sign_level, seal_nextday = EXCLUDED.seal_nextday,
+              auction_price = EXCLUDED.auction_price,
+              auction_pct = EXCLUDED.auction_pct,
+              auction_volume = EXCLUDED.auction_volume,
+              auction_amount = EXCLUDED.auction_amount,
+              auction_turnover_pct = EXCLUDED.auction_turnover_pct,
+              auction_unmatched = EXCLUDED.auction_unmatched,
+              auction_volume_ratio = EXCLUDED.auction_volume_ratio,
+              auction_yesterday_ratio_pct = EXCLUDED.auction_yesterday_ratio_pct,
+              float_market_cap = EXCLUDED.float_market_cap,
+              last_price = EXCLUDED.last_price, open_price = EXCLUDED.open_price,
+              pre_close_price = EXCLUDED.pre_close_price, tags = EXCLUDED.tags,
               as_of_ms = EXCLUDED.as_of_ms, row_order = EXCLUDED.row_order,
               extra = EXCLUDED.extra, captured_at = NOW()
             """
         )
         params = [
-            {**row, "extra": json.dumps(row["extra"], ensure_ascii=False, separators=(",", ":"))}
+            {
+                **row,
+                "extra": json.dumps(
+                    row["extra"], ensure_ascii=False, separators=(",", ":")
+                ),
+                "tags": json.dumps(
+                    row["tags"], ensure_ascii=False, separators=(",", ":")
+                )
+                if row["tags"] is not None
+                else None,
+            }
             for row in rows
         ]
         with self.engine.begin() as connection:
@@ -632,6 +858,40 @@ class ThsSnapshotStore:
             for row in raw_rows
         ]
         self._upsert_standardized(records)
+
+    def rebuild_standardized(self) -> dict[str, int]:
+        """Rebuild the derived standardized table from untouched raw snapshots."""
+        with self.engine.begin() as connection:
+            raw_rows = connection.execute(
+                text(
+                    """
+                    SELECT snapshot_date, dataset, scope_key, symbol, as_of_ms,
+                           payload, source_request_id, row_count
+                    FROM qm_ths_daily_snapshots
+                    ORDER BY id
+                    """
+                )
+            ).mappings().all()
+        records = [
+            SnapshotRecord(
+                snapshot_date=row["snapshot_date"],
+                dataset=row["dataset"],
+                scope_key=row["scope_key"],
+                symbol=row["symbol"],
+                as_of_ms=row["as_of_ms"],
+                payload=row["payload"] or {},
+                request_id=row["source_request_id"],
+                row_count=int(row["row_count"] or 0),
+            )
+            for row in raw_rows
+        ]
+        with self.engine.begin() as connection:
+            connection.execute(text(f"DELETE FROM {STANDARD_TABLE}"))
+        standardized_rows = self._upsert_standardized(records)
+        return {
+            "raw_rows": len(records),
+            "standardized_rows": standardized_rows,
+        }
 
     def upsert(self, records: Iterable[SnapshotRecord]) -> int:
         rows = list(records)

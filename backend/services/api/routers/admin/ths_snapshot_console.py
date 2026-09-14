@@ -155,6 +155,14 @@ STANDARD_COLUMN_TYPES: dict[str, str] = {
     "turnover_pct": "float", "market_cap": "float", "pe_ttm": "float",
     "pe_mrq": "float", "pb_mrq": "float", "ps_ttm": "float", "pcf_ttm": "float",
     "seal_amount": "float", "sentiment_score": "float", "metric_value": "float", "weight": "float",
+    "event_date": "date", "heat": "float", "rank_change": "int",
+    "rank_trend": "string", "board_name": "string", "board_num": "int",
+    "sign_level": "int", "seal_nextday": "bool", "auction_price": "float",
+    "auction_pct": "float", "auction_volume": "float", "auction_amount": "float",
+    "auction_turnover_pct": "float", "auction_unmatched": "float",
+    "auction_volume_ratio": "float", "auction_yesterday_ratio_pct": "float",
+    "float_market_cap": "float", "last_price": "float", "open_price": "float",
+    "pre_close_price": "float", "tags": "json",
 }
 
 
@@ -499,13 +507,19 @@ async def preview_ths_snapshot(
             "id", "snapshot_date", "dataset", "scope_key", "as_of_ms", "captured_at", "extra",
             *columns,
         ]
+        order_by = (
+            "event_date DESC NULLS LAST, board_num DESC NULLS LAST, "
+            "row_order NULLS LAST, symbol NULLS LAST"
+            if dataset == "limit_up_ladder"
+            else "row_order NULLS LAST, symbol NULLS LAST, scope_key, id"
+        )
         rows_result = await session.execute(
             text(
                 f"""
                 SELECT {', '.join(dict.fromkeys(selected))}
                 FROM {STANDARD_TABLE}
                 WHERE {where}
-                ORDER BY symbol NULLS LAST, scope_key, id
+                ORDER BY {order_by}
                 LIMIT :limit
                 """
             ),
