@@ -42,6 +42,26 @@ function formatPayloadValue(value: unknown): React.ReactNode {
     return String(value);
 }
 
+const STANDARD_COLUMN_LABELS: Record<string, string> = {
+    symbol: '代码', name: '名称', index_code: '指数代码', exchange: '市场', category: '分类',
+    rank: '排名', price: '价格', change_pct: '涨跌幅', change_amount: '涨跌额',
+    volume: '成交量', amount: '成交额', turnover_pct: '换手率', market_cap: '总市值',
+    pe_ttm: '市盈率TTM', pe_mrq: '市盈率MRQ', pb_mrq: '市净率MRQ', ps_ttm: '市销率TTM',
+    pcf_ttm: '市现率TTM', limit_up_count: '涨停数', limit_down_count: '跌停数',
+    consecutive_limit_count: '连板数', seal_amount: '封单金额', sentiment_score: '情绪分',
+    label: '标签', weight: '权重', metric_value: '指标值',
+};
+
+function formatStandardValue(value: unknown): React.ReactNode {
+    if (value === null || value === undefined || value === '') {
+        return <Text type="secondary">-</Text>;
+    }
+    if (typeof value === 'number') {
+        return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(4);
+    }
+    return String(value);
+}
+
 interface PreviewModalProps {
     dataset: ThsSnapshotDataset | null;
     onClose: () => void;
@@ -95,52 +115,19 @@ function ThsSnapshotPreviewModal({ dataset, onClose }: PreviewModalProps) {
     }, [dataset, load]);
 
     const rows = preview?.data ?? [];
-    const columns: ColumnsType<(typeof rows)[number]> = [
-        {
-            title: '代码',
-            key: 'symbol',
-            width: 180,
-            render: (_, row) => (
-                <Space direction="vertical" size={0}>
-                    <Text strong>
-                        {String(row.symbol || row.payload.thscode || '-')}
-                    </Text>
-                    <Text type="secondary" className="text-xs">
-                        {String(row.payload.name ?? row.scope_key)}
-                    </Text>
-                </Space>
-            ),
-        },
-        {
-            title: '上游时间',
-            dataIndex: 'as_of_ms',
-            width: 170,
-            render: (value: number | null) => (
-                value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-'
-            ),
-        },
-        {
-            title: '字段数',
-            key: 'field_count',
-            width: 90,
-            align: 'right',
-            render: (_, row) => Object.keys(row.payload ?? {}).length,
-        },
-        {
-            title: '采集时间',
-            dataIndex: 'captured_at',
-            width: 170,
-            render: formatDateTime,
-        },
-        {
-            title: '状态',
-            dataIndex: 'status',
-            width: 90,
-            render: (status: string) => (
-                <Tag color={status === 'success' ? 'green' : 'red'}>{status}</Tag>
-            ),
-        },
-    ];
+    const columns: ColumnsType<(typeof rows)[number]> = (preview?.columns ?? []).map((column) => ({
+        title: (
+            <Space direction="vertical" size={0}>
+                <Text strong>{STANDARD_COLUMN_LABELS[column.name] ?? column.name}</Text>
+                <Text type="secondary" className="text-xs">{column.name} · {column.dtype}</Text>
+            </Space>
+        ),
+        dataIndex: column.name,
+        key: column.name,
+        width: 150,
+        ellipsis: true,
+        render: formatStandardValue,
+    }));
 
     return (
         <Modal
@@ -188,10 +175,10 @@ function ThsSnapshotPreviewModal({ dataset, onClose }: PreviewModalProps) {
 
                 {preview && (
                     <Space wrap size="small">
-                        <Tag color="cyan">PostgreSQL JSONB</Tag>
+                        <Tag color="green">PostgreSQL 标准化表</Tag>
                         <Tag>{preview.snapshot_date || '无快照日期'}</Tag>
                         <Tag>{preview.rows_total.toLocaleString()} 条记录</Tag>
-                        <Tag>{preview.payload_fields.length} 个原始字段</Tag>
+                        <Tag>{preview.column_count} 个标准字段</Tag>
                     </Space>
                 )}
 
@@ -205,11 +192,17 @@ function ThsSnapshotPreviewModal({ dataset, onClose }: PreviewModalProps) {
                         size="small"
                         loading={loading}
                         pagination={{ pageSize: 20, size: 'small', showSizeChanger: true }}
-                        scroll={{ x: 760, y: 440 }}
+                        scroll={{ x: 'max-content', y: 440 }}
                         expandable={{
                             expandedRowRender: (row) => (
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-2 p-3 bg-slate-50">
-                                    {Object.entries(row.payload ?? {}).map(([key, value]) => (
+                                    <div className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 text-xs">
+                                        <Text type="secondary">内部范围键</Text>
+                                        <pre className="m-0 whitespace-pre-wrap break-all font-mono text-slate-700">
+                                            {row.scope_key}
+                                        </pre>
+                                    </div>
+                                    {Object.entries(row.extra ?? {}).map(([key, value]) => (
                                         <div key={key} className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 text-xs">
                                             <Text type="secondary" className="break-all">{key}</Text>
                                             <pre className="m-0 whitespace-pre-wrap break-all font-mono text-slate-700">
@@ -233,6 +226,7 @@ export function AdminThsSnapshotPanel() {
     const [groups, setGroups] = useState<ThsSnapshotGroup[]>([]);
     const [datasets, setDatasets] = useState<ThsSnapshotDataset[]>([]);
     const [tableReady, setTableReady] = useState(false);
+    const [standardizedTableReady, setStandardizedTableReady] = useState(false);
     const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
     const [scheduleEnabled, setScheduleEnabled] = useState(false);
     const [loading, setLoading] = useState(false);
@@ -248,6 +242,7 @@ export function AdminThsSnapshotPanel() {
             setGroups(result.groups ?? []);
             setDatasets(result.datasets ?? []);
             setTableReady(result.table_ready);
+            setStandardizedTableReady(Boolean(result.standardized_table_ready));
             setApiKeyConfigured(result.api_key_configured);
             setScheduleEnabled(result.schedule_enabled);
         } catch (loadError: unknown) {
@@ -414,6 +409,9 @@ export function AdminThsSnapshotPanel() {
                     <Tag color={tableReady ? 'green' : 'default'}>
                         {tableReady ? '存储已就绪' : '尚未建表'}
                     </Tag>
+                    <Tag color={standardizedTableReady ? 'green' : 'default'}>
+                        {standardizedTableReady ? '标准化表已就绪' : '标准化表待初始化'}
+                    </Tag>
                     <Tag color={apiKeyConfigured ? 'blue' : 'default'}>
                         {apiKeyConfigured ? '密钥已配置' : '密钥未配置'}
                     </Tag>
@@ -456,7 +454,7 @@ export function AdminThsSnapshotPanel() {
                 </div>
                 <div className="px-4 py-3">
                     <Text type="secondary" className="text-xs block">存储类型</Text>
-                    <Text strong className="text-lg">PostgreSQL JSONB</Text>
+                    <Text strong className="text-lg">标准化表 + 原始 JSONB</Text>
                 </div>
             </div>
 
